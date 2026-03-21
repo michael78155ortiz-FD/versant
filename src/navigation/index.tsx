@@ -16,6 +16,8 @@ import ProfileScreen from '../screens/ProfileScreen'
 import QuizScreen from '../screens/QuizScreen'
 import PhotoUploadScreen from '../screens/PhotoUploadScreen'
 import TravelModeScreen from '../screens/TravelModeScreen'
+import ScheduleCallScreen from '../screens/ScheduleCallScreen'
+import PaywallScreen from '../screens/PaywallScreen'
 
 const Stack = createNativeStackNavigator()
 
@@ -41,7 +43,7 @@ export default function Navigation() {
         {session ? (
           <>
             <Stack.Screen name="Discover" component={DiscoverScreen} />
-            <Stack.Screen name="Pods" component={PodsScreen} />
+            <Stack.Screen name="Messages" component={PodsScreen} />
             <Stack.Screen name="Chat" component={ChatScreen} />
             <Stack.Screen name="Reveal" component={RevealScreen} />
             <Stack.Screen name="Date" component={DateScreen} />
@@ -49,6 +51,8 @@ export default function Navigation() {
             <Stack.Screen name="Quiz" component={QuizScreen} />
             <Stack.Screen name="PhotoUpload" component={PhotoUploadScreen} />
             <Stack.Screen name="TravelMode" component={TravelModeScreen} />
+            <Stack.Screen name="ScheduleCall" component={ScheduleCallScreen} />
+            <Stack.Screen name="Paywall" component={PaywallScreen} />
           </>
         ) : (
           <>

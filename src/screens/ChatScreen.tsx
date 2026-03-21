@@ -14,248 +14,234 @@ import {
 import { Audio } from 'expo-av'
 import { supabase } from '../lib/supabase'
 
-const MOCK_MESSAGES = [
-  {
-    id: '1',
-    type: 'audio',
-    sender: 'them',
-    duration: '0:31',
-    time: '9:14 AM',
-  },
-  {
-    id: '2',
-    type: 'text',
-    sender: 'me',
-    content: 'your take on that was actually really surprising — in the best way',
-    time: '9:18 AM',
-  },
-  {
-    id: '3',
-    type: 'text',
-    sender: 'them',
-    content: 'most people expect the safe answer lol',
-    time: '9:19 AM',
-  },
-  {
-    id: '4',
-    type: 'ai_prompt',
-    content: 'You both value financial independence. Ask: "what does enough actually look like to you?"',
-  },
-  {
-    id: '5',
-    type: 'text',
-    sender: 'me',
-    content: 'ok real question — what does "enough money" look like to you?',
-    time: '9:22 AM',
-  },
-  {
-    id: '6',
-    type: 'audio',
-    sender: 'them',
-    duration: '0:47',
-    time: '9:24 AM',
-  },
-]
-
 export default function ChatScreen({ navigation, route }: any) {
   const [message, setMessage] = useState('')
-  const [messages, setMessages] = useState(MOCK_MESSAGES)
+  const [messages, setMessages] = useState<any[]>([])
   const [recording, setRecording] = useState<Audio.Recording | null>(null)
   const [isRecording, setIsRecording] = useState(false)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [uploading, setUploading] = useState(false)
+  const [iceBreakers, setIceBreakers] = useState<string[]>([])
+  const [deepQuestion, setDeepQuestion] = useState<string | null>(null)
+  const [loadingDeepQ, setLoadingDeepQ] = useState(false)
+  const [shownQuestionIds, setShownQuestionIds] = useState<string[]>([])
   const scrollRef = useRef<ScrollView>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const podName = route?.params?.pod?.name ?? route?.params?.match?.profile?.full_name ?? 'Maya'
-  const talkTime = route?.params?.pod?.talkTime ?? 12
+  const podName = route?.params?.pod?.name ?? route?.params?.match?.matched_user_name ?? 'Your Match'
+  const matchId = route?.params?.match?.id ?? route?.params?.pod?.id ?? null
 
   useEffect(() => {
+    loadIceBreakers()
+    loadDateSuggestions()
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (recording) recording.stopAndUnloadAsync()
     }
   }, [])
 
+  async function loadIceBreakers() {
+    const { data } = await supabase
+      .from('ice_breakers')
+      .select('id, question')
+      .limit(100)
+
+    if (data && data.length > 0) {
+      const shuffled = data.sort(() => Math.random() - 0.5)
+      const picked = shuffled.slice(0, 3)
+      setIceBreakers(picked.map(q => q.question))
+      setShownQuestionIds(picked.map(q => q.id))
+    }
+  }
+
+  async function loadDateSuggestions() {
+    if (!matchId) return
+    const { data } = await supabase
+      .from('date_suggestions')
+      .select('*')
+      .eq('match_id', matchId)
+      .order('created_at', { ascending: true })
+
+    if (data && data.length > 0) {
+      const suggestionMessages = data.map(s => ({
+        id: `suggestion_${s.id}`,
+        type: 'date_suggestion',
+        sender: 'me',
+        venue_name: s.venue_name,
+        venue_address: s.venue_address,
+        venue_phone: s.venue_phone,
+        venue_website: s.venue_website,
+        time: new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      }))
+      setMessages(prev => [...prev, ...suggestionMessages])
+    }
+  }
+
+  async function generateDeepQuestion() {
+    setLoadingDeepQ(true)
+
+    const { data } = await supabase
+      .from('deep_questions')
+      .select('id, question')
+      .limit(200)
+
+    if (data && data.length > 0) {
+      const unseen = data.filter(q => !shownQuestionIds.includes(q.id))
+      const pool = unseen.length > 0 ? unseen : data
+      const picked = pool[Math.floor(Math.random() * pool.length)]
+      setDeepQuestion(picked.question)
+      setShownQuestionIds(prev => [...prev, picked.id])
+    }
+
+    setLoadingDeepQ(false)
+  }
+
   async function startRecording() {
     try {
       const permission = await Audio.requestPermissionsAsync()
       if (!permission.granted) {
-        if (Platform.OS === 'web') {
-          window.alert('Microphone permission is required to send voice notes.')
-        }
+        if (Platform.OS === 'web') window.alert('Microphone access needed. Works on iPhone app.')
         return
       }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      })
-
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true })
       const { recording: newRecording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       )
-
       setRecording(newRecording)
       setIsRecording(true)
       setRecordingDuration(0)
-
-      timerRef.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1)
-      }, 1000)
-    } catch (err) {
-      console.error('Failed to start recording:', err)
-      if (Platform.OS === 'web') {
-        window.alert('Voice recording is not supported in the browser. It works on the iPhone app.')
-      }
+      timerRef.current = setInterval(() => setRecordingDuration(prev => prev + 1), 1000)
+    } catch {
+      if (Platform.OS === 'web') window.alert('Voice notes work on the iPhone app.')
     }
   }
 
   async function stopRecording() {
     if (!recording) return
-
-    if (timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
     setIsRecording(false)
     setUploading(true)
-
     try {
       await recording.stopAndUnloadAsync()
       const uri = recording.getURI()
       setRecording(null)
-
       if (uri) {
         const { data: { user } } = await supabase.auth.getUser()
         if (!user) return
-
         const fileName = `voice/${user.id}/${Date.now()}.m4a`
         const response = await fetch(uri)
         const blob = await response.blob()
-
-        await supabase.storage
-          .from('voice-notes')
-          .upload(fileName, blob, {
-            contentType: 'audio/m4a',
-            upsert: true,
-          })
-
-        const duration = recordingDuration
-        const mins = Math.floor(duration / 60)
-        const secs = duration % 60
-        const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`
-
+        await supabase.storage.from('voice-notes').upload(fileName, blob, { contentType: 'audio/m4a', upsert: true })
+        const mins = Math.floor(recordingDuration / 60)
+        const secs = recordingDuration % 60
         const newMessage = {
           id: Date.now().toString(),
           type: 'audio',
           sender: 'me',
-          duration: durationStr,
-          time: new Date().toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
+          duration: `${mins}:${secs.toString().padStart(2, '0')}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         }
-
         setMessages(prev => [...prev, newMessage])
         setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
       }
-    } catch (err) {
-      console.error('Failed to stop recording:', err)
-    }
-
+    } catch (err) { console.error(err) }
     setUploading(false)
     setRecordingDuration(0)
   }
 
   function handleSend() {
     if (!message.trim()) return
-
     const newMessage = {
       id: Date.now().toString(),
       type: 'text',
       sender: 'me',
       content: message.trim(),
-      time: new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     }
-
     setMessages(prev => [...prev, newMessage])
     setMessage('')
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
   }
 
-  function formatDuration(seconds: number): string {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
-  const progressPercent = Math.min((talkTime / 20) * 100, 100)
-
   return (
     <SafeAreaView style={styles.container}>
-      {/* Top Bar */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
         <View style={styles.topCenter}>
           <Text style={styles.topName}>{podName}</Text>
-          <Text style={styles.topSub}>
-            {talkTime} / 20 min · {20 - talkTime} min to reveal
-          </Text>
+          <Text style={styles.topSub}>Photos hidden until your 15 min call</Text>
         </View>
-        <TouchableOpacity onPress={() => navigation.navigate('Reveal')}>
-          <Text style={styles.revealText}>Reveal</Text>
-        </TouchableOpacity>
+        <View style={{ width: 50 }} />
       </View>
 
-      {/* Progress Bar */}
-      <View style={styles.progressWrap}>
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
+      <TouchableOpacity
+        style={styles.scheduleCallBtn}
+        onPress={() => navigation.navigate('ScheduleCall', {
+          matchId,
+          matchName: podName,
+          userId: route?.params?.match?.matched_user_id ?? null,
+        })}
+      >
+        <Text style={styles.scheduleCallIcon}>📞</Text>
+        <View style={styles.scheduleCallInfo}>
+          <Text style={styles.scheduleCallTitle}>Schedule Your Call</Text>
+          <Text style={styles.scheduleCallSub}>Stay on 15 min → photos reveal automatically</Text>
         </View>
-      </View>
+        <View style={styles.scheduleCallBadge}>
+          <Text style={styles.scheduleCallBadgeText}>Tap</Text>
+        </View>
+      </TouchableOpacity>
 
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.keyboardView}
         keyboardVerticalOffset={90}
       >
-        {/* Messages */}
         <ScrollView
           ref={scrollRef}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.messagesContent}
-          onContentSizeChange={() =>
-            scrollRef.current?.scrollToEnd({ animated: true })
-          }
+          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
         >
-          <Text style={styles.dateDivider}>Pod started · Today 9:12 AM</Text>
+          {/* Ice Breakers */}
+          {iceBreakers.length > 0 && (
+            <View style={styles.iceBreakerCard}>
+              <Text style={styles.iceBreakerTitle}>🎉 You matched! Break the ice:</Text>
+              {iceBreakers.map((q, i) => (
+                <View key={i} style={styles.iceBreakerRow}>
+                  <Text style={styles.iceBreakerEmoji}>
+                    {i === 0 ? '😂' : i === 1 ? '🤔' : '😄'}
+                  </Text>
+                  <Text style={styles.iceBreakerText}>{q}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          <Text style={styles.dateDivider}>Conversation started today</Text>
 
           {messages.map(msg => {
-            if (msg.type === 'ai_prompt') {
+            if (msg.type === 'date_suggestion') {
               return (
-                <View key={msg.id} style={styles.aiPrompt}>
-                  <Text style={styles.aiPromptLabel}>✨ AI conversation starter</Text>
-                  <Text style={styles.aiPromptText}>{msg.content}</Text>
+                <View key={msg.id} style={[styles.msgWrap, styles.msgWrapMe]}>
+                  <View style={styles.dateSuggestionCard}>
+                    <Text style={styles.dateSuggestionLabel}>📅 Date suggestion sent</Text>
+                    <Text style={styles.dateSuggestionVenue}>{msg.venue_name}</Text>
+                    <Text style={styles.dateSuggestionAddress}>📍 {msg.venue_address}</Text>
+                    {msg.venue_phone !== '' && (
+                      <Text style={styles.dateSuggestionDetail}>📞 {msg.venue_phone}</Text>
+                    )}
+                  </View>
+                  {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
                 </View>
               )
             }
 
             if (msg.type === 'audio') {
               return (
-                <View
-                  key={msg.id}
-                  style={[
-                    styles.msgWrap,
-                    msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem,
-                  ]}
-                >
+                <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
                   <View style={styles.audioBubble}>
                     <TouchableOpacity style={styles.playButton}>
                       <Text style={styles.playIcon}>▶</Text>
@@ -273,25 +259,9 @@ export default function ChatScreen({ navigation, route }: any) {
             }
 
             return (
-              <View
-                key={msg.id}
-                style={[
-                  styles.msgWrap,
-                  msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem,
-                ]}
-              >
-                <View
-                  style={[
-                    styles.bubble,
-                    msg.sender === 'me' ? styles.bubbleMe : styles.bubbleThem,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.bubbleText,
-                      msg.sender === 'me' ? styles.bubbleTextMe : styles.bubbleTextThem,
-                    ]}
-                  >
+              <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
+                <View style={[styles.bubble, msg.sender === 'me' ? styles.bubbleMe : styles.bubbleThem]}>
+                  <Text style={[styles.bubbleText, msg.sender === 'me' ? styles.bubbleTextMe : styles.bubbleTextThem]}>
                     {msg.content}
                   </Text>
                 </View>
@@ -300,63 +270,73 @@ export default function ChatScreen({ navigation, route }: any) {
             )
           })}
 
-          {/* Reveal Nudge */}
-          <View style={styles.revealNudge}>
-            <Text style={styles.revealNudgeTitle}>
-              Almost there — {20 - talkTime} minutes left
-            </Text>
-            <Text style={styles.revealNudgeSub}>
-              Keep talking to unlock the reveal
-            </Text>
-            <TouchableOpacity
-              style={styles.revealNudgeBtn}
-              onPress={() => navigation.navigate('Reveal')}
-            >
-              <Text style={styles.revealNudgeBtnText}>Request Reveal Now</Text>
-            </TouchableOpacity>
-          </View>
+          {/* Deep Question */}
+          {deepQuestion && (
+            <View style={styles.deepQuestionCard}>
+              <Text style={styles.deepQuestionLabel}>✨ Deep question</Text>
+              <Text style={styles.deepQuestionText}>{deepQuestion}</Text>
+              <TouchableOpacity
+                style={styles.newQuestionBtn}
+                onPress={generateDeepQuestion}
+                disabled={loadingDeepQ}
+              >
+                <Text style={styles.newQuestionBtnText}>
+                  {loadingDeepQ ? 'Loading...' : 'Generate another →'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </ScrollView>
 
-        {/* Recording indicator */}
+        {/* Generate Deep Question Button */}
+        {!deepQuestion && (
+          <TouchableOpacity
+            style={styles.generateBtn}
+            onPress={generateDeepQuestion}
+            disabled={loadingDeepQ}
+          >
+            {loadingDeepQ ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Text style={styles.generateBtnText}>✨ Generate a deeper question</Text>
+            )}
+          </TouchableOpacity>
+        )}
+
+        {/* Recording Banner */}
         {isRecording && (
           <View style={styles.recordingBanner}>
             <View style={styles.recordingDot} />
             <Text style={styles.recordingText}>
-              Recording... {formatDuration(recordingDuration)}
+              Recording... {Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}
             </Text>
-            <Text style={styles.recordingHint}>Tap mic to send</Text>
+            <Text style={styles.recordingHint}>Tap 🎙️ again to send</Text>
           </View>
         )}
 
         {/* Input Bar */}
         <View style={styles.inputBar}>
-          <TextInput
-            style={styles.input}
-            placeholder="Message..."
-            placeholderTextColor="#ABABAA"
-            value={message}
-            onChangeText={setMessage}
-            multiline
-            maxLength={500}
-            onSubmitEditing={handleSend}
-          />
-
           {uploading ? (
             <View style={styles.micButton}>
               <ActivityIndicator color="#FFFFFF" size="small" />
             </View>
           ) : (
             <TouchableOpacity
-              style={[
-                styles.micButton,
-                isRecording && styles.micButtonRecording,
-              ]}
+              style={[styles.micButton, isRecording && styles.micButtonRecording]}
               onPress={isRecording ? stopRecording : startRecording}
             >
               <Text style={styles.micIcon}>🎙️</Text>
             </TouchableOpacity>
           )}
-
+          <TextInput
+            style={styles.input}
+            placeholder="Type a message..."
+            placeholderTextColor="#ABABAA"
+            value={message}
+            onChangeText={setMessage}
+            multiline
+            maxLength={500}
+          />
           {message.trim().length > 0 && (
             <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
               <Text style={styles.sendIcon}>↑</Text>
@@ -369,278 +349,64 @@ export default function ChatScreen({ navigation, route }: any) {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FAFAF8',
-  },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#EBEBEA',
-  },
-  backText: {
-    fontSize: 15,
-    color: '#C85A2A',
-    fontWeight: '500',
-  },
-  topCenter: {
-    alignItems: 'center',
-  },
-  topName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1A1A18',
-  },
-  topSub: {
-    fontSize: 10,
-    color: '#ABABAA',
-    marginTop: 1,
-  },
-  revealText: {
-    fontSize: 14,
-    color: '#C85A2A',
-    fontWeight: '600',
-  },
-  progressWrap: {
-    backgroundColor: '#FFFFFF',
-    paddingBottom: 1,
-  },
-  progressTrack: {
-    height: 3,
-    backgroundColor: '#F5F4F2',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#C85A2A',
-  },
-  keyboardView: {
-    flex: 1,
-  },
-  messagesContent: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 16,
-    gap: 10,
-  },
-  dateDivider: {
-    textAlign: 'center',
-    fontSize: 10,
-    color: '#ABABAA',
-    marginBottom: 4,
-  },
-  msgWrap: {
-    maxWidth: '76%',
-    gap: 3,
-  },
-  msgWrapMe: {
-    alignSelf: 'flex-end',
-    alignItems: 'flex-end',
-  },
-  msgWrapThem: {
-    alignSelf: 'flex-start',
-    alignItems: 'flex-start',
-  },
-  bubble: {
-    padding: 12,
-    borderRadius: 18,
-  },
-  bubbleMe: {
-    backgroundColor: '#C85A2A',
-    borderBottomRightRadius: 4,
-  },
-  bubbleThem: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#EBEBEA',
-    borderBottomLeftRadius: 4,
-  },
-  bubbleText: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  bubbleTextMe: {
-    color: '#FFFFFF',
-  },
-  bubbleTextThem: {
-    color: '#1A1A18',
-  },
-  audioBubble: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    padding: 10,
-    borderRadius: 18,
-    borderBottomLeftRadius: 4,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#EBEBEA',
-  },
-  playButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#C85A2A',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playIcon: {
-    fontSize: 10,
-    color: '#FFFFFF',
-    marginLeft: 2,
-  },
-  waveform: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    height: 20,
-  },
-  waveBar: {
-    width: 2.5,
-    borderRadius: 2,
-    backgroundColor: '#EBEBEA',
-  },
-  audioDuration: {
-    fontSize: 11,
-    color: '#ABABAA',
-  },
-  msgTime: {
-    fontSize: 9,
-    color: '#ABABAA',
-  },
-  aiPrompt: {
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: '#FDF0EB',
-    borderWidth: 1,
-    borderColor: '#F2D4C8',
-    marginVertical: 4,
-  },
-  aiPromptLabel: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: '#C85A2A',
-    marginBottom: 4,
-  },
-  aiPromptText: {
-    fontSize: 12,
-    color: '#C85A2A',
-    opacity: 0.85,
-    lineHeight: 18,
-  },
-  revealNudge: {
-    padding: 14,
-    borderRadius: 16,
-    backgroundColor: '#FDF0EB',
-    borderWidth: 1,
-    borderColor: '#F2D4C8',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  revealNudgeTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#C85A2A',
-    marginBottom: 4,
-  },
-  revealNudgeSub: {
-    fontSize: 11,
-    color: '#C85A2A',
-    opacity: 0.7,
-    marginBottom: 10,
-  },
-  revealNudgeBtn: {
-    width: '100%',
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: '#C85A2A',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  revealNudgeBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
-  recordingBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: '#FDF0EB',
-    borderTopWidth: 1,
-    borderTopColor: '#F2D4C8',
-  },
-  recordingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#DC2626',
-  },
-  recordingText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#C85A2A',
-    flex: 1,
-  },
-  recordingHint: {
-    fontSize: 11,
-    color: '#C85A2A',
-    opacity: 0.7,
-  },
-  inputBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#EBEBEA',
-  },
-  input: {
-    flex: 1,
-    minHeight: 38,
-    maxHeight: 100,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#EBEBEA',
-    backgroundColor: '#FAFAF8',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    fontSize: 14,
-    color: '#1A1A18',
-  },
-  micButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#C85A2A',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  micButtonRecording: {
-    backgroundColor: '#DC2626',
-  },
-  micIcon: {
-    fontSize: 16,
-  },
-  sendButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#C85A2A',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendIcon: {
-    fontSize: 18,
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
+  container: { flex: 1, backgroundColor: '#FAFAF8' },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
+  backText: { fontSize: 15, color: '#C85A2A', fontWeight: '500' },
+  topCenter: { alignItems: 'center', flex: 1 },
+  topName: { fontSize: 16, fontWeight: '600', color: '#1A1A18' },
+  topSub: { fontSize: 11, color: '#ABABAA', marginTop: 2, textAlign: 'center' },
+  scheduleCallBtn: { flexDirection: 'row', alignItems: 'center', gap: 12, margin: 12, padding: 16, borderRadius: 18, backgroundColor: '#C85A2A', shadowColor: '#C85A2A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 12 },
+  scheduleCallIcon: { fontSize: 24 },
+  scheduleCallInfo: { flex: 1 },
+  scheduleCallTitle: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
+  scheduleCallSub: { fontSize: 11, color: 'rgba(255,255,255,0.8)', marginTop: 2 },
+  scheduleCallBadge: { paddingVertical: 5, paddingHorizontal: 12, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.25)' },
+  scheduleCallBadgeText: { fontSize: 12, fontWeight: '700', color: '#FFFFFF' },
+  keyboardView: { flex: 1 },
+  messagesContent: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, gap: 10 },
+  iceBreakerCard: { padding: 16, borderRadius: 20, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#EBEBEA', gap: 12, marginBottom: 8 },
+  iceBreakerTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A18' },
+  iceBreakerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  iceBreakerEmoji: { fontSize: 20, marginTop: 2 },
+  iceBreakerText: { flex: 1, fontSize: 14, color: '#6B6B68', lineHeight: 22 },
+  dateDivider: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 4 },
+  msgWrap: { maxWidth: '80%', gap: 3, alignSelf: 'flex-start' },
+  msgWrapMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
+  msgWrapThem: { alignSelf: 'flex-start', alignItems: 'flex-start' },
+  bubble: { padding: 14, borderRadius: 20 },
+  bubbleMe: { backgroundColor: '#C85A2A', borderBottomRightRadius: 4 },
+  bubbleThem: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', borderBottomLeftRadius: 4 },
+  bubbleText: { fontSize: 15, lineHeight: 22 },
+  bubbleTextMe: { color: '#FFFFFF' },
+  bubbleTextThem: { color: '#1A1A18' },
+  dateSuggestionCard: { padding: 14, borderRadius: 16, backgroundColor: '#FDF0EB', borderWidth: 1.5, borderColor: '#C85A2A', gap: 4, maxWidth: 280 },
+  dateSuggestionLabel: { fontSize: 11, fontWeight: '600', color: '#C85A2A', marginBottom: 4 },
+  dateSuggestionVenue: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
+  dateSuggestionAddress: { fontSize: 12, color: '#6B6B68' },
+  dateSuggestionDetail: { fontSize: 12, color: '#6B6B68' },
+  audioBubble: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 20, borderBottomLeftRadius: 4, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA' },
+  playButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
+  playIcon: { fontSize: 12, color: '#FFFFFF', marginLeft: 2 },
+  waveform: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 20 },
+  waveBar: { width: 3, borderRadius: 2, backgroundColor: '#EBEBEA' },
+  audioDuration: { fontSize: 12, color: '#ABABAA' },
+  msgTime: { fontSize: 10, color: '#ABABAA' },
+  deepQuestionCard: { padding: 16, borderRadius: 18, backgroundColor: '#F5F0FF', borderWidth: 1.5, borderColor: '#D4BBFF', gap: 10, marginTop: 8 },
+  deepQuestionLabel: { fontSize: 12, fontWeight: '700', color: '#7C3AED' },
+  deepQuestionText: { fontSize: 15, color: '#1A1A18', lineHeight: 24, fontWeight: '500' },
+  newQuestionBtn: { alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#7C3AED' },
+  newQuestionBtnText: { fontSize: 12, fontWeight: '600', color: '#FFFFFF' },
+  generateBtn: { marginHorizontal: 16, marginBottom: 8, height: 46, borderRadius: 14, backgroundColor: '#7C3AED', alignItems: 'center', justifyContent: 'center' },
+  generateBtnText: { fontSize: 14, fontWeight: '600', color: '#FFFFFF' },
+  recordingBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#FEF2F2', borderTopWidth: 1, borderTopColor: '#FECACA' },
+  recordingDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#DC2626' },
+  recordingText: { fontSize: 14, fontWeight: '600', color: '#DC2626', flex: 1 },
+  recordingHint: { fontSize: 12, color: '#DC2626', opacity: 0.7 },
+  inputBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#EBEBEA' },
+  input: { flex: 1, minHeight: 44, maxHeight: 120, borderRadius: 22, borderWidth: 1, borderColor: '#EBEBEA', backgroundColor: '#FAFAF8', paddingHorizontal: 16, paddingVertical: 10, fontSize: 15, color: '#1A1A18' },
+  micButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
+  micButtonRecording: { backgroundColor: '#DC2626' },
+  micIcon: { fontSize: 18 },
+  sendButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
+  sendIcon: { fontSize: 20, color: '#FFFFFF', fontWeight: '600' },
 })
