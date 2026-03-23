@@ -10,9 +10,21 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Modal,
+  Alert,
 } from 'react-native'
 import { Audio } from 'expo-av'
 import { supabase } from '../lib/supabase'
+
+const REPORT_REASONS = [
+  { value: 'harassment', label: 'Harassment or bullying', emoji: '😡' },
+  { value: 'threatening', label: 'Threatening behavior', emoji: '⚠️' },
+  { value: 'inappropriate', label: 'Inappropriate content', emoji: '🚫' },
+  { value: 'fake', label: 'Fake profile or impersonation', emoji: '🎭' },
+  { value: 'underage', label: 'Possibly underage', emoji: '👶' },
+  { value: 'spam', label: 'Spam or scam', emoji: '📵' },
+  { value: 'other', label: 'Other', emoji: '💬' },
+]
 
 export default function ChatScreen({ navigation, route }: any) {
   const [message, setMessage] = useState('')
@@ -25,27 +37,48 @@ export default function ChatScreen({ navigation, route }: any) {
   const [deepQuestion, setDeepQuestion] = useState<string | null>(null)
   const [loadingDeepQ, setLoadingDeepQ] = useState(false)
   const [shownQuestionIds, setShownQuestionIds] = useState<string[]>([])
+  const [showReportModal, setShowReportModal] = useState(false)
+  const [showBlockModal, setShowBlockModal] = useState(false)
+  const [selectedMessage, setSelectedMessage] = useState<any>(null)
+  const [selectedReason, setSelectedReason] = useState('')
+  const [submittingReport, setSubmittingReport] = useState(false)
+  const [reportSuccess, setReportSuccess] = useState(false)
+  const [isBlocked, setIsBlocked] = useState(false)
   const scrollRef = useRef<ScrollView>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const podName = route?.params?.pod?.name ?? route?.params?.match?.matched_user_name ?? 'Your Match'
   const matchId = route?.params?.match?.id ?? route?.params?.pod?.id ?? null
+  const matchedUserId = route?.params?.match?.matched_user_id ?? null
+  const matchedUserName = route?.params?.match?.matched_user_name ?? 'Your Match'
 
   useEffect(() => {
     loadIceBreakers()
     loadDateSuggestions()
+    checkIfBlocked()
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (recording) recording.stopAndUnloadAsync()
     }
   }, [])
 
+  async function checkIfBlocked() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user || !matchedUserId) return
+    const { data } = await supabase
+      .from('blocked_users')
+      .select('id')
+      .eq('blocker_id', user.id)
+      .eq('blocked_id', matchedUserId)
+      .single()
+    if (data) setIsBlocked(true)
+  }
+
   async function loadIceBreakers() {
     const { data } = await supabase
       .from('ice_breakers')
       .select('id, question')
       .limit(100)
-
     if (data && data.length > 0) {
       const shuffled = data.sort(() => Math.random() - 0.5)
       const picked = shuffled.slice(0, 3)
@@ -61,7 +94,6 @@ export default function ChatScreen({ navigation, route }: any) {
       .select('*')
       .eq('match_id', matchId)
       .order('created_at', { ascending: true })
-
     if (data && data.length > 0) {
       const suggestionMessages = data.map(s => ({
         id: `suggestion_${s.id}`,
@@ -69,8 +101,6 @@ export default function ChatScreen({ navigation, route }: any) {
         sender: 'me',
         venue_name: s.venue_name,
         venue_address: s.venue_address,
-        venue_phone: s.venue_phone,
-        venue_website: s.venue_website,
         time: new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       }))
       setMessages(prev => [...prev, ...suggestionMessages])
@@ -79,12 +109,10 @@ export default function ChatScreen({ navigation, route }: any) {
 
   async function generateDeepQuestion() {
     setLoadingDeepQ(true)
-
     const { data } = await supabase
       .from('deep_questions')
       .select('id, question')
       .limit(200)
-
     if (data && data.length > 0) {
       const unseen = data.filter(q => !shownQuestionIds.includes(q.id))
       const pool = unseen.length > 0 ? unseen : data
@@ -92,8 +120,80 @@ export default function ChatScreen({ navigation, route }: any) {
       setDeepQuestion(picked.question)
       setShownQuestionIds(prev => [...prev, picked.id])
     }
-
     setLoadingDeepQ(false)
+  }
+
+  async function handleBlock() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    await supabase.from('blocked_users').insert({
+      blocker_id: user.id,
+      blocked_id: matchedUserId || matchId,
+      blocked_name: matchedUserName,
+    })
+
+    await supabase.from('matches')
+      .update({ status: 'blocked' })
+      .eq('id', matchId)
+
+    setIsBlocked(true)
+    setShowBlockModal(false)
+    navigation.navigate('Messages')
+  }
+
+  async function handleReport() {
+    if (!selectedReason) return
+    setSubmittingReport(true)
+
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    const strikeCount = await addStrike(matchedUserId || matchId)
+
+    await supabase.from('reports').insert({
+      reporter_id: user.id,
+      reported_user_id: matchedUserId || null,
+      match_id: matchId,
+      message_id: selectedMessage?.id || null,
+      message_content: selectedMessage?.content || selectedMessage?.duration || null,
+      message_type: selectedMessage?.type || 'text',
+      reason: selectedReason,
+      status: 'pending',
+    })
+
+    if (strikeCount >= 3) {
+      await supabase.from('profiles')
+        .update({ is_suspended: true, suspended_reason: 'Three reports received — pending review' })
+        .eq('id', matchedUserId)
+
+      await supabase.from('moderation_log').insert({
+        user_id: matchedUserId || null,
+        action: 'auto_suspended',
+        reason: 'Reached 3 strikes — pending CEO review',
+      })
+    }
+
+    setSubmittingReport(false)
+    setReportSuccess(true)
+    setSelectedReason('')
+    setSelectedMessage(null)
+  }
+
+  async function addStrike(userId: string): Promise<number> {
+    await supabase.from('strikes').insert({
+      user_id: userId,
+      reason: selectedReason,
+    })
+    const { count } = await supabase
+      .from('strikes')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+    const newCount = (count ?? 0)
+    await supabase.from('profiles')
+      .update({ strike_count: newCount })
+      .eq('id', userId)
+    return newCount
   }
 
   async function startRecording() {
@@ -163,8 +263,151 @@ export default function ChatScreen({ navigation, route }: any) {
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
   }
 
+  function handleLongPress(msg: any) {
+    if (msg.sender === 'them') {
+      setSelectedMessage(msg)
+      setShowReportModal(true)
+    }
+  }
+
   return (
     <SafeAreaView style={styles.container}>
+
+      {/* Report Modal */}
+      <Modal visible={showReportModal} animationType="slide" presentationStyle="pageSheet">
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalTopBar}>
+            <Text style={styles.modalTitle}>Report Message</Text>
+            <TouchableOpacity onPress={() => {
+              setShowReportModal(false)
+              setSelectedReason('')
+              setReportSuccess(false)
+            }}>
+              <Text style={styles.modalClose}>Close</Text>
+            </TouchableOpacity>
+          </View>
+
+          {reportSuccess ? (
+            <View style={styles.reportSuccess}>
+              <Text style={styles.reportSuccessEmoji}>✅</Text>
+              <Text style={styles.reportSuccessTitle}>Report submitted</Text>
+              <Text style={styles.reportSuccessText}>
+                Thank you for keeping Versant safe. We will review this within 24 hours.
+              </Text>
+              <TouchableOpacity
+                style={styles.reportSuccessBtn}
+                onPress={() => {
+                  setShowReportModal(false)
+                  setReportSuccess(false)
+                }}
+              >
+                <Text style={styles.reportSuccessBtnText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <ScrollView contentContainerStyle={styles.modalScroll}>
+              <Text style={styles.modalSubtitle}>
+                What is the reason for this report?
+              </Text>
+
+              {selectedMessage && (
+                <View style={styles.reportedMessagePreview}>
+                  <Text style={styles.reportedMessageLabel}>Reported message:</Text>
+                  <Text style={styles.reportedMessageContent}>
+                    {selectedMessage.type === 'audio'
+                      ? `🎙️ Voice note (${selectedMessage.duration})`
+                      : selectedMessage.content}
+                  </Text>
+                </View>
+              )}
+
+              {REPORT_REASONS.map(reason => (
+                <TouchableOpacity
+                  key={reason.value}
+                  style={[
+                    styles.reasonRow,
+                    selectedReason === reason.value && styles.reasonRowSelected,
+                  ]}
+                  onPress={() => setSelectedReason(reason.value)}
+                >
+                  <Text style={styles.reasonEmoji}>{reason.emoji}</Text>
+                  <Text style={[
+                    styles.reasonLabel,
+                    selectedReason === reason.value && styles.reasonLabelSelected,
+                  ]}>
+                    {reason.label}
+                  </Text>
+                  {selectedReason === reason.value && (
+                    <Text style={styles.reasonCheck}>✓</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+
+              <View style={styles.reportNote}>
+                <Text style={styles.reportNoteText}>
+                  🔒 Reports are reviewed by our safety team within 24 hours.
+                  All report content is kept on file for legal purposes.
+                </Text>
+              </View>
+            </ScrollView>
+          )}
+
+          {!reportSuccess && (
+            <View style={styles.modalBottom}>
+              <TouchableOpacity
+                style={[
+                  styles.submitReportBtn,
+                  (!selectedReason || submittingReport) && styles.submitReportBtnDisabled,
+                ]}
+                onPress={handleReport}
+                disabled={!selectedReason || submittingReport}
+              >
+                {submittingReport ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitReportBtnText}>Submit Report</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+        </SafeAreaView>
+      </Modal>
+
+      {/* Block Modal */}
+      <Modal visible={showBlockModal} animationType="slide" presentationStyle="pageSheet">
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalTopBar}>
+            <Text style={styles.modalTitle}>Block {matchedUserName}?</Text>
+            <TouchableOpacity onPress={() => setShowBlockModal(false)}>
+              <Text style={styles.modalClose}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.blockContent}>
+            <Text style={styles.blockEmoji}>🚫</Text>
+            <Text style={styles.blockTitle}>Block {matchedUserName}</Text>
+            <Text style={styles.blockText}>
+              They will not be able to message you or find you on Versant.
+              They will not be notified that you blocked them.
+            </Text>
+            <View style={styles.blockNote}>
+              <Text style={styles.blockNoteText}>
+                💡 If you are experiencing harassment please also report the specific message by long pressing on it.
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.blockBtn} onPress={handleBlock}>
+              <Text style={styles.blockBtnText}>Yes Block {matchedUserName}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.blockCancelBtn}
+              onPress={() => setShowBlockModal(false)}
+            >
+              <Text style={styles.blockCancelBtnText}>Never mind</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* Top Bar */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backText}>← Back</Text>
@@ -173,26 +416,43 @@ export default function ChatScreen({ navigation, route }: any) {
           <Text style={styles.topName}>{podName}</Text>
           <Text style={styles.topSub}>Photos hidden until your 15 min call</Text>
         </View>
-        <View style={{ width: 50 }} />
+        <TouchableOpacity
+          style={styles.blockReportBtn}
+          onPress={() => setShowBlockModal(true)}
+        >
+          <Text style={styles.blockReportBtnText}>⋯</Text>
+        </TouchableOpacity>
       </View>
 
-      <TouchableOpacity
-        style={styles.scheduleCallBtn}
-        onPress={() => navigation.navigate('ScheduleCall', {
-          matchId,
-          matchName: podName,
-          userId: route?.params?.match?.matched_user_id ?? null,
-        })}
-      >
-        <Text style={styles.scheduleCallIcon}>📞</Text>
-        <View style={styles.scheduleCallInfo}>
-          <Text style={styles.scheduleCallTitle}>Schedule Your Call</Text>
-          <Text style={styles.scheduleCallSub}>Stay on 15 min → photos reveal automatically</Text>
+      {/* Blocked Banner */}
+      {isBlocked && (
+        <View style={styles.blockedBanner}>
+          <Text style={styles.blockedBannerText}>
+            🚫 You have blocked this person. They can no longer contact you.
+          </Text>
         </View>
-        <View style={styles.scheduleCallBadge}>
-          <Text style={styles.scheduleCallBadgeText}>Tap</Text>
-        </View>
-      </TouchableOpacity>
+      )}
+
+      {/* Schedule Call Button */}
+      {!isBlocked && (
+        <TouchableOpacity
+          style={styles.scheduleCallBtn}
+          onPress={() => navigation.navigate('ScheduleCall', {
+            matchId,
+            matchName: podName,
+            userId: matchedUserId,
+          })}
+        >
+          <Text style={styles.scheduleCallIcon}>📞</Text>
+          <View style={styles.scheduleCallInfo}>
+            <Text style={styles.scheduleCallTitle}>Schedule Your Call</Text>
+            <Text style={styles.scheduleCallSub}>Stay on 15 min → photos reveal automatically</Text>
+          </View>
+          <View style={styles.scheduleCallBadge}>
+            <Text style={styles.scheduleCallBadgeText}>Tap</Text>
+          </View>
+        </TouchableOpacity>
+      )}
 
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -221,6 +481,7 @@ export default function ChatScreen({ navigation, route }: any) {
           )}
 
           <Text style={styles.dateDivider}>Conversation started today</Text>
+          <Text style={styles.holdHint}>💡 Long press any message to report it</Text>
 
           {messages.map(msg => {
             if (msg.type === 'date_suggestion') {
@@ -230,9 +491,6 @@ export default function ChatScreen({ navigation, route }: any) {
                     <Text style={styles.dateSuggestionLabel}>📅 Date suggestion sent</Text>
                     <Text style={styles.dateSuggestionVenue}>{msg.venue_name}</Text>
                     <Text style={styles.dateSuggestionAddress}>📍 {msg.venue_address}</Text>
-                    {msg.venue_phone !== '' && (
-                      <Text style={styles.dateSuggestionDetail}>📞 {msg.venue_phone}</Text>
-                    )}
                   </View>
                   {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
                 </View>
@@ -241,7 +499,12 @@ export default function ChatScreen({ navigation, route }: any) {
 
             if (msg.type === 'audio') {
               return (
-                <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
+                <TouchableOpacity
+                  key={msg.id}
+                  style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}
+                  onLongPress={() => handleLongPress(msg)}
+                  delayLongPress={400}
+                >
                   <View style={styles.audioBubble}>
                     <TouchableOpacity style={styles.playButton}>
                       <Text style={styles.playIcon}>▶</Text>
@@ -254,19 +517,24 @@ export default function ChatScreen({ navigation, route }: any) {
                     <Text style={styles.audioDuration}>{msg.duration}</Text>
                   </View>
                   {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
-                </View>
+                </TouchableOpacity>
               )
             }
 
             return (
-              <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
+              <TouchableOpacity
+                key={msg.id}
+                style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}
+                onLongPress={() => handleLongPress(msg)}
+                delayLongPress={400}
+              >
                 <View style={[styles.bubble, msg.sender === 'me' ? styles.bubbleMe : styles.bubbleThem]}>
                   <Text style={[styles.bubbleText, msg.sender === 'me' ? styles.bubbleTextMe : styles.bubbleTextThem]}>
                     {msg.content}
                   </Text>
                 </View>
                 {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
-              </View>
+              </TouchableOpacity>
             )
           })}
 
@@ -289,7 +557,7 @@ export default function ChatScreen({ navigation, route }: any) {
         </ScrollView>
 
         {/* Generate Deep Question Button */}
-        {!deepQuestion && (
+        {!deepQuestion && !isBlocked && (
           <TouchableOpacity
             style={styles.generateBtn}
             onPress={generateDeepQuestion}
@@ -315,34 +583,36 @@ export default function ChatScreen({ navigation, route }: any) {
         )}
 
         {/* Input Bar */}
-        <View style={styles.inputBar}>
-          {uploading ? (
-            <View style={styles.micButton}>
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            </View>
-          ) : (
-            <TouchableOpacity
-              style={[styles.micButton, isRecording && styles.micButtonRecording]}
-              onPress={isRecording ? stopRecording : startRecording}
-            >
-              <Text style={styles.micIcon}>🎙️</Text>
-            </TouchableOpacity>
-          )}
-          <TextInput
-            style={styles.input}
-            placeholder="Type a message..."
-            placeholderTextColor="#ABABAA"
-            value={message}
-            onChangeText={setMessage}
-            multiline
-            maxLength={500}
-          />
-          {message.trim().length > 0 && (
-            <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
-              <Text style={styles.sendIcon}>↑</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+        {!isBlocked && (
+          <View style={styles.inputBar}>
+            {uploading ? (
+              <View style={styles.micButton}>
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={[styles.micButton, isRecording && styles.micButtonRecording]}
+                onPress={isRecording ? stopRecording : startRecording}
+              >
+                <Text style={styles.micIcon}>🎙️</Text>
+              </TouchableOpacity>
+            )}
+            <TextInput
+              style={styles.input}
+              placeholder="Type a message..."
+              placeholderTextColor="#ABABAA"
+              value={message}
+              onChangeText={setMessage}
+              multiline
+              maxLength={500}
+            />
+            {message.trim().length > 0 && (
+              <TouchableOpacity style={styles.sendButton} onPress={handleSend}>
+                <Text style={styles.sendIcon}>↑</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   )
@@ -350,11 +620,52 @@ export default function ChatScreen({ navigation, route }: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FAFAF8' },
+  modalContainer: { flex: 1, backgroundColor: '#FAFAF8' },
+  modalTopBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
+  modalTitle: { fontSize: 17, fontWeight: '600', color: '#1A1A18' },
+  modalClose: { fontSize: 15, color: '#C85A2A', fontWeight: '500' },
+  modalScroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 32, gap: 10 },
+  modalSubtitle: { fontSize: 14, color: '#6B6B68', marginBottom: 8 },
+  modalBottom: { padding: 20, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#EBEBEA' },
+  reportedMessagePreview: { padding: 14, borderRadius: 14, backgroundColor: '#F5F4F2', borderWidth: 1, borderColor: '#EBEBEA', marginBottom: 8 },
+  reportedMessageLabel: { fontSize: 11, fontWeight: '600', color: '#ABABAA', marginBottom: 4 },
+  reportedMessageContent: { fontSize: 14, color: '#1A1A18', lineHeight: 20 },
+  reasonRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1.5, borderColor: '#EBEBEA' },
+  reasonRowSelected: { borderColor: '#C85A2A', backgroundColor: 'rgba(200,90,42,0.04)' },
+  reasonEmoji: { fontSize: 22 },
+  reasonLabel: { flex: 1, fontSize: 14, color: '#1A1A18', fontWeight: '500' },
+  reasonLabelSelected: { color: '#C85A2A', fontWeight: '600' },
+  reasonCheck: { fontSize: 16, color: '#C85A2A', fontWeight: '700' },
+  reportNote: { padding: 14, borderRadius: 14, backgroundColor: '#E8F8F2', borderWidth: 1, borderColor: '#C0EAD8', marginTop: 8 },
+  reportNoteText: { fontSize: 12, color: '#1D9E75', lineHeight: 18 },
+  submitReportBtn: { height: 54, borderRadius: 16, backgroundColor: '#DC2626', alignItems: 'center', justifyContent: 'center' },
+  submitReportBtnDisabled: { backgroundColor: '#E8E8E4' },
+  submitReportBtnText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
+  reportSuccess: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 14 },
+  reportSuccessEmoji: { fontSize: 56 },
+  reportSuccessTitle: { fontSize: 22, fontWeight: '600', color: '#1A1A18' },
+  reportSuccessText: { fontSize: 14, color: '#6B6B68', textAlign: 'center', lineHeight: 22 },
+  reportSuccessBtn: { height: 52, paddingHorizontal: 32, borderRadius: 16, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
+  reportSuccessBtnText: { fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
+  blockContent: { flex: 1, padding: 28, alignItems: 'center', gap: 14 },
+  blockEmoji: { fontSize: 56 },
+  blockTitle: { fontSize: 22, fontWeight: '600', color: '#1A1A18', textAlign: 'center' },
+  blockText: { fontSize: 14, color: '#6B6B68', textAlign: 'center', lineHeight: 22 },
+  blockNote: { padding: 14, borderRadius: 14, backgroundColor: '#FDF0EB', borderWidth: 1, borderColor: '#F2D4C8', width: '100%' },
+  blockNoteText: { fontSize: 13, color: '#C85A2A', lineHeight: 20 },
+  blockBtn: { width: '100%', height: 54, borderRadius: 16, backgroundColor: '#DC2626', alignItems: 'center', justifyContent: 'center' },
+  blockBtnText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
+  blockCancelBtn: { width: '100%', height: 48, borderRadius: 16, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', alignItems: 'center', justifyContent: 'center' },
+  blockCancelBtnText: { fontSize: 15, color: '#6B6B68', fontWeight: '500' },
   topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
   backText: { fontSize: 15, color: '#C85A2A', fontWeight: '500' },
   topCenter: { alignItems: 'center', flex: 1 },
   topName: { fontSize: 16, fontWeight: '600', color: '#1A1A18' },
   topSub: { fontSize: 11, color: '#ABABAA', marginTop: 2, textAlign: 'center' },
+  blockReportBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F5F4F2', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#EBEBEA' },
+  blockReportBtnText: { fontSize: 18, color: '#6B6B68', fontWeight: '700' },
+  blockedBanner: { padding: 12, backgroundColor: '#FEF2F2', borderBottomWidth: 1, borderBottomColor: '#FECACA' },
+  blockedBannerText: { fontSize: 13, color: '#DC2626', textAlign: 'center', fontWeight: '500' },
   scheduleCallBtn: { flexDirection: 'row', alignItems: 'center', gap: 12, margin: 12, padding: 16, borderRadius: 18, backgroundColor: '#C85A2A', shadowColor: '#C85A2A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 12 },
   scheduleCallIcon: { fontSize: 24 },
   scheduleCallInfo: { flex: 1 },
@@ -369,7 +680,8 @@ const styles = StyleSheet.create({
   iceBreakerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   iceBreakerEmoji: { fontSize: 20, marginTop: 2 },
   iceBreakerText: { flex: 1, fontSize: 14, color: '#6B6B68', lineHeight: 22 },
-  dateDivider: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 4 },
+  dateDivider: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 2 },
+  holdHint: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 8 },
   msgWrap: { maxWidth: '80%', gap: 3, alignSelf: 'flex-start' },
   msgWrapMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
   msgWrapThem: { alignSelf: 'flex-start', alignItems: 'flex-start' },
@@ -383,7 +695,6 @@ const styles = StyleSheet.create({
   dateSuggestionLabel: { fontSize: 11, fontWeight: '600', color: '#C85A2A', marginBottom: 4 },
   dateSuggestionVenue: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
   dateSuggestionAddress: { fontSize: 12, color: '#6B6B68' },
-  dateSuggestionDetail: { fontSize: 12, color: '#6B6B68' },
   audioBubble: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 20, borderBottomLeftRadius: 4, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA' },
   playButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
   playIcon: { fontSize: 12, color: '#FFFFFF', marginLeft: 2 },

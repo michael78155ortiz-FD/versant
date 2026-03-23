@@ -11,9 +11,17 @@ import {
   Image,
   Platform,
   Alert,
+  Modal,
 } from 'react-native'
 import * as ImagePicker from 'expo-image-picker'
 import { supabase } from '../lib/supabase'
+
+interface BlockedUser {
+  id: string
+  blocked_id: string
+  blocked_name: string
+  created_at: string
+}
 
 export default function ProfileScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true)
@@ -28,10 +36,14 @@ export default function ProfileScreen({ navigation }: any) {
   const [travelMode, setTravelModeState] = useState(false)
   const [travelCity, setTravelCity] = useState('')
   const [matchCount, setMatchCount] = useState(0)
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([])
+  const [showBlockedModal, setShowBlockedModal] = useState(false)
+  const [unblocking, setUnblocking] = useState('')
 
   useEffect(() => {
     loadProfile()
     loadMatchCount()
+    loadBlockedUsers()
   }, [])
 
   async function loadProfile() {
@@ -66,6 +78,30 @@ export default function ProfileScreen({ navigation }: any) {
     setMatchCount(count ?? 0)
   }
 
+  async function loadBlockedUsers() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data } = await supabase
+      .from('blocked_users')
+      .select('*')
+      .eq('blocker_id', user.id)
+      .order('created_at', { ascending: false })
+    setBlockedUsers(data ?? [])
+  }
+
+  async function handleUnblock(blockedId: string, name: string) {
+    setUnblocking(blockedId)
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    await supabase
+      .from('blocked_users')
+      .delete()
+      .eq('blocker_id', user.id)
+      .eq('blocked_id', blockedId)
+    setBlockedUsers(prev => prev.filter(b => b.blocked_id !== blockedId))
+    setUnblocking('')
+  }
+
   async function handleSave() {
     setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
@@ -83,18 +119,18 @@ export default function ProfileScreen({ navigation }: any) {
     if (error) {
       Platform.OS === 'web' ? window.alert('Error: ' + error.message) : Alert.alert('Error', error.message)
     } else {
-      Platform.OS === 'web' ? window.alert('Saved! Your profile has been updated.') : Alert.alert('Saved ✓', 'Your profile has been updated.')
+      Platform.OS === 'web' ? window.alert('Saved! Your profile has been updated.') : Alert.alert('Saved ✓', 'Profile updated.')
     }
   }
 
   async function handleAddPhoto() {
     if (photos.length >= 3) {
-      Platform.OS === 'web' ? window.alert('Maximum 3 photos allowed.') : Alert.alert('Max photos', 'You can have up to 3 photos.')
+      Platform.OS === 'web' ? window.alert('Maximum 3 photos allowed.') : Alert.alert('Max photos', 'Up to 3 photos allowed.')
       return
     }
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync()
     if (!permission.granted) {
-      Platform.OS === 'web' ? window.alert('Please allow access to your photos.') : Alert.alert('Permission needed', 'Please allow access to your photos.')
+      Platform.OS === 'web' ? window.alert('Please allow access to your photos.') : Alert.alert('Permission needed', 'Please allow photo access.')
       return
     }
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -122,7 +158,7 @@ export default function ProfileScreen({ navigation }: any) {
         setPhotos(newPhotos)
         Platform.OS === 'web' ? window.alert('Photo added!') : Alert.alert('Photo added ✓')
       } catch (err: any) {
-        Platform.OS === 'web' ? window.alert('Failed to upload: ' + err.message) : Alert.alert('Error', 'Failed to upload photo.')
+        Platform.OS === 'web' ? window.alert('Failed: ' + err.message) : Alert.alert('Error', 'Failed to upload.')
       }
       setUploadingPhoto(false)
     }
@@ -161,7 +197,7 @@ export default function ProfileScreen({ navigation }: any) {
 
   async function handleDeleteAccount() {
     if (Platform.OS === 'web') {
-      const confirmed = window.confirm('This will permanently delete your account and all your data. This cannot be undone. Are you sure?')
+      const confirmed = window.confirm('This will permanently delete your account and all your data. This cannot be undone.')
       if (!confirmed) return
       const doubleConfirm = window.confirm('Last chance — delete everything forever?')
       if (!doubleConfirm) return
@@ -170,7 +206,7 @@ export default function ProfileScreen({ navigation }: any) {
       await supabase.from('profiles').delete().eq('id', user.id)
       await supabase.auth.signOut()
     } else {
-      Alert.alert('Delete Account', 'This will permanently delete your account and all your data. This cannot be undone.', [
+      Alert.alert('Delete Account', 'This will permanently delete your account and all your data.', [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete Forever', style: 'destructive', onPress: async () => {
@@ -194,6 +230,57 @@ export default function ProfileScreen({ navigation }: any) {
 
   return (
     <SafeAreaView style={styles.container}>
+
+      {/* Blocked Users Modal */}
+      <Modal visible={showBlockedModal} animationType="slide" presentationStyle="pageSheet">
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalTopBar}>
+            <Text style={styles.modalTitle}>Blocked Users</Text>
+            <TouchableOpacity onPress={() => setShowBlockedModal(false)}>
+              <Text style={styles.modalClose}>Done</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.modalScroll}>
+            {blockedUsers.length === 0 ? (
+              <View style={styles.emptyBlocked}>
+                <Text style={styles.emptyBlockedEmoji}>✅</Text>
+                <Text style={styles.emptyBlockedTitle}>No blocked users</Text>
+                <Text style={styles.emptyBlockedSub}>
+                  Users you block will appear here.
+                </Text>
+              </View>
+            ) : (
+              blockedUsers.map(blocked => (
+                <View key={blocked.id} style={styles.blockedRow}>
+                  <View style={styles.blockedAvatar}>
+                    <Text style={styles.blockedAvatarText}>
+                      {blocked.blocked_name ? blocked.blocked_name[0].toUpperCase() : '?'}
+                    </Text>
+                  </View>
+                  <View style={styles.blockedInfo}>
+                    <Text style={styles.blockedName}>{blocked.blocked_name || 'Unknown user'}</Text>
+                    <Text style={styles.blockedDate}>
+                      Blocked {new Date(blocked.created_at).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.unblockBtn}
+                    onPress={() => handleUnblock(blocked.blocked_id, blocked.blocked_name)}
+                    disabled={unblocking === blocked.blocked_id}
+                  >
+                    {unblocking === blocked.blocked_id ? (
+                      <ActivityIndicator color="#C85A2A" size="small" />
+                    ) : (
+                      <Text style={styles.unblockBtnText}>Unblock</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       <View style={styles.topBar}>
         <Text style={styles.topTitle}>My Profile</Text>
         <TouchableOpacity onPress={handleSave} disabled={saving}>
@@ -206,7 +293,7 @@ export default function ProfileScreen({ navigation }: any) {
         {/* Photos */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>My Photos</Text>
-          <Text style={styles.sectionSub}>Hidden from everyone until your 15 min call reveal</Text>
+          <Text style={styles.sectionSub}>Hidden until your 15 min call reveal</Text>
           <View style={styles.photoGrid}>
             {[0, 1, 2].map(index => (
               <View key={index} style={styles.photoSlot}>
@@ -264,7 +351,7 @@ export default function ProfileScreen({ navigation }: any) {
             <TextInput style={styles.input} value={fullName} onChangeText={setFullName} autoCapitalize="words" placeholderTextColor="#ABABAA" placeholder="Your name" />
           </View>
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Age (must be 18 or older)</Text>
+            <Text style={styles.label}>Age</Text>
             <TextInput style={styles.input} value={age} onChangeText={setAge} keyboardType="number-pad" placeholderTextColor="#ABABAA" placeholder="Your age" maxLength={2} />
           </View>
           <View style={styles.inputGroup}>
@@ -273,7 +360,7 @@ export default function ProfileScreen({ navigation }: any) {
           </View>
           <View style={styles.inputGroup}>
             <Text style={styles.label}>About Me</Text>
-            <TextInput style={styles.textArea} value={bio} onChangeText={setBio} placeholder="Tell people a little about yourself..." placeholderTextColor="#ABABAA" multiline numberOfLines={4} maxLength={300} />
+            <TextInput style={styles.textArea} value={bio} onChangeText={setBio} placeholder="Tell people about yourself..." placeholderTextColor="#ABABAA" multiline numberOfLines={4} maxLength={300} />
             <Text style={styles.charCount}>{bio.length} / 300</Text>
           </View>
         </View>
@@ -294,7 +381,7 @@ export default function ProfileScreen({ navigation }: any) {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
           {[
-            { icon: '📝', title: 'Compatibility Quiz', sub: quizCompleted ? 'Retake your quiz' : 'Complete your quiz — helps us find your match', screen: 'Quiz' },
+            { icon: '📝', title: 'Compatibility Quiz', sub: quizCompleted ? 'Retake your quiz' : 'Complete your quiz', screen: 'Quiz' },
             { icon: '✈️', title: 'Travel Mode', sub: travelMode ? `Active — ${travelCity}` : 'Find matches when traveling', screen: 'TravelMode' },
           ].map(item => (
             <TouchableOpacity key={item.title} style={styles.actionRow} onPress={() => navigation.navigate(item.screen)}>
@@ -308,6 +395,23 @@ export default function ProfileScreen({ navigation }: any) {
               <Text style={styles.actionArrow}>→</Text>
             </TouchableOpacity>
           ))}
+
+          {/* Blocked Users */}
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={() => setShowBlockedModal(true)}
+          >
+            <View style={styles.actionLeft}>
+              <Text style={styles.actionIcon}>🚫</Text>
+              <View>
+                <Text style={styles.actionTitle}>Blocked Users</Text>
+                <Text style={styles.actionSub}>
+                  {blockedUsers.length > 0 ? `${blockedUsers.length} blocked` : 'No blocked users'}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.actionArrow}>→</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Stats */}
@@ -322,6 +426,16 @@ export default function ProfileScreen({ navigation }: any) {
               <Text style={styles.statLabel}>{stat.label}</Text>
             </View>
           ))}
+        </View>
+
+        {/* Safety */}
+        <View style={styles.safetyBox}>
+          <Text style={styles.safetyTitle}>🛡️ Your Safety</Text>
+          <Text style={styles.safetyText}>
+            Long press any message in a conversation to report it.
+            Reports are reviewed within 24 hours.
+            Contact us at safety@versantapp.com
+          </Text>
         </View>
 
         {/* Sign Out */}
@@ -359,6 +473,23 @@ export default function ProfileScreen({ navigation }: any) {
 const styles = StyleSheet.create({
   loadingContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' },
   container: { flex: 1, backgroundColor: '#FAFAF8' },
+  modalContainer: { flex: 1, backgroundColor: '#FAFAF8' },
+  modalTopBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
+  modalTitle: { fontSize: 17, fontWeight: '600', color: '#1A1A18' },
+  modalClose: { fontSize: 15, color: '#C85A2A', fontWeight: '600' },
+  modalScroll: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 32, gap: 10 },
+  emptyBlocked: { alignItems: 'center', paddingVertical: 48, gap: 10 },
+  emptyBlockedEmoji: { fontSize: 48 },
+  emptyBlockedTitle: { fontSize: 18, fontWeight: '600', color: '#1A1A18' },
+  emptyBlockedSub: { fontSize: 13, color: '#6B6B68', textAlign: 'center' },
+  blockedRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: '#EBEBEA' },
+  blockedAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#F5F4F2', alignItems: 'center', justifyContent: 'center' },
+  blockedAvatarText: { fontSize: 18, fontWeight: '600', color: '#6B6B68' },
+  blockedInfo: { flex: 1 },
+  blockedName: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
+  blockedDate: { fontSize: 12, color: '#ABABAA', marginTop: 2 },
+  unblockBtn: { paddingVertical: 7, paddingHorizontal: 14, borderRadius: 20, backgroundColor: '#FDF0EB', borderWidth: 1, borderColor: '#F2D4C8' },
+  unblockBtnText: { fontSize: 13, fontWeight: '600', color: '#C85A2A' },
   topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
   topTitle: { fontSize: 20, fontWeight: '600', color: '#1A1A18' },
   saveText: { fontSize: 15, color: '#C85A2A', fontWeight: '600' },
@@ -405,6 +536,9 @@ const styles = StyleSheet.create({
   statBox: { flex: 1, padding: 14, borderRadius: 16, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', alignItems: 'center', gap: 4 },
   statValue: { fontSize: 24, fontWeight: '600', color: '#C85A2A' },
   statLabel: { fontSize: 10, color: '#ABABAA', textAlign: 'center' },
+  safetyBox: { padding: 16, borderRadius: 16, backgroundColor: '#E8F8F2', borderWidth: 1, borderColor: '#C0EAD8', gap: 6 },
+  safetyTitle: { fontSize: 14, fontWeight: '600', color: '#1D9E75' },
+  safetyText: { fontSize: 13, color: '#1D9E75', lineHeight: 20 },
   signOutButton: { height: 52, borderRadius: 16, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', alignItems: 'center', justifyContent: 'center' },
   signOutText: { fontSize: 15, fontWeight: '500', color: '#6B6B68' },
   deleteButton: { height: 52, borderRadius: 16, backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FECACA', alignItems: 'center', justifyContent: 'center' },
