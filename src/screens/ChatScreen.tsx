@@ -11,7 +11,6 @@ import {
   Platform,
   ActivityIndicator,
   Modal,
-  Alert,
 } from 'react-native'
 import { Audio } from 'expo-av'
 import { supabase } from '../lib/supabase'
@@ -126,17 +125,14 @@ export default function ChatScreen({ navigation, route }: any) {
   async function handleBlock() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
     await supabase.from('blocked_users').insert({
       blocker_id: user.id,
       blocked_id: matchedUserId || matchId,
       blocked_name: matchedUserName,
     })
-
     await supabase.from('matches')
       .update({ status: 'blocked' })
       .eq('id', matchId)
-
     setIsBlocked(true)
     setShowBlockModal(false)
     navigation.navigate('Messages')
@@ -145,11 +141,8 @@ export default function ChatScreen({ navigation, route }: any) {
   async function handleReport() {
     if (!selectedReason) return
     setSubmittingReport(true)
-
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
-    const strikeCount = await addStrike(matchedUserId || matchId)
 
     await supabase.from('reports').insert({
       reporter_id: user.id,
@@ -162,38 +155,26 @@ export default function ChatScreen({ navigation, route }: any) {
       status: 'pending',
     })
 
-    if (strikeCount >= 3) {
-      await supabase.from('profiles')
-        .update({ is_suspended: true, suspended_reason: 'Three reports received — pending review' })
-        .eq('id', matchedUserId)
+    await supabase.from('strikes').insert({
+      user_id: matchedUserId || null,
+      reason: selectedReason,
+    })
 
-      await supabase.from('moderation_log').insert({
-        user_id: matchedUserId || null,
-        action: 'auto_suspended',
-        reason: 'Reached 3 strikes — pending CEO review',
-      })
+    const { count } = await supabase
+      .from('strikes')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', matchedUserId)
+
+    if ((count ?? 0) >= 3) {
+      await supabase.from('profiles')
+        .update({ is_suspended: true, suspended_reason: 'Three reports — pending review' })
+        .eq('id', matchedUserId)
     }
 
     setSubmittingReport(false)
     setReportSuccess(true)
     setSelectedReason('')
     setSelectedMessage(null)
-  }
-
-  async function addStrike(userId: string): Promise<number> {
-    await supabase.from('strikes').insert({
-      user_id: userId,
-      reason: selectedReason,
-    })
-    const { count } = await supabase
-      .from('strikes')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-    const newCount = (count ?? 0)
-    await supabase.from('profiles')
-      .update({ strike_count: newCount })
-      .eq('id', userId)
-    return newCount
   }
 
   async function startRecording() {
@@ -234,14 +215,14 @@ export default function ChatScreen({ navigation, route }: any) {
         await supabase.storage.from('voice-notes').upload(fileName, blob, { contentType: 'audio/m4a', upsert: true })
         const mins = Math.floor(recordingDuration / 60)
         const secs = recordingDuration % 60
-        const newMessage = {
+        const newMsg = {
           id: Date.now().toString(),
           type: 'audio',
           sender: 'me',
           duration: `${mins}:${secs.toString().padStart(2, '0')}`,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         }
-        setMessages(prev => [...prev, newMessage])
+        setMessages(prev => [...prev, newMsg])
         setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
       }
     } catch (err) { console.error(err) }
@@ -251,23 +232,23 @@ export default function ChatScreen({ navigation, route }: any) {
 
   function handleSend() {
     if (!message.trim()) return
-    const newMessage = {
+    const newMsg = {
       id: Date.now().toString(),
       type: 'text',
       sender: 'me',
       content: message.trim(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     }
-    setMessages(prev => [...prev, newMessage])
+    setMessages(prev => [...prev, newMsg])
     setMessage('')
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
   }
 
-  function handleLongPress(msg: any) {
-    if (msg.sender === 'them') {
-      setSelectedMessage(msg)
-      setShowReportModal(true)
-    }
+  function openReport(msg: any) {
+    setSelectedMessage(msg)
+    setReportSuccess(false)
+    setSelectedReason('')
+    setShowReportModal(true)
   }
 
   return (
@@ -278,11 +259,7 @@ export default function ChatScreen({ navigation, route }: any) {
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalTopBar}>
             <Text style={styles.modalTitle}>Report Message</Text>
-            <TouchableOpacity onPress={() => {
-              setShowReportModal(false)
-              setSelectedReason('')
-              setReportSuccess(false)
-            }}>
+            <TouchableOpacity onPress={() => { setShowReportModal(false); setReportSuccess(false) }}>
               <Text style={styles.modalClose}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -294,81 +271,57 @@ export default function ChatScreen({ navigation, route }: any) {
               <Text style={styles.reportSuccessText}>
                 Thank you for keeping Versant safe. We will review this within 24 hours.
               </Text>
-              <TouchableOpacity
-                style={styles.reportSuccessBtn}
-                onPress={() => {
-                  setShowReportModal(false)
-                  setReportSuccess(false)
-                }}
-              >
+              <TouchableOpacity style={styles.reportSuccessBtn} onPress={() => { setShowReportModal(false); setReportSuccess(false) }}>
                 <Text style={styles.reportSuccessBtnText}>Done</Text>
               </TouchableOpacity>
             </View>
           ) : (
-            <ScrollView contentContainerStyle={styles.modalScroll}>
-              <Text style={styles.modalSubtitle}>
-                What is the reason for this report?
-              </Text>
+            <>
+              <ScrollView contentContainerStyle={styles.modalScroll}>
+                <Text style={styles.modalSubtitle}>What is the reason for this report?</Text>
 
-              {selectedMessage && (
-                <View style={styles.reportedMessagePreview}>
-                  <Text style={styles.reportedMessageLabel}>Reported message:</Text>
-                  <Text style={styles.reportedMessageContent}>
-                    {selectedMessage.type === 'audio'
-                      ? `🎙️ Voice note (${selectedMessage.duration})`
-                      : selectedMessage.content}
+                {selectedMessage && (
+                  <View style={styles.reportedPreview}>
+                    <Text style={styles.reportedLabel}>Reported message:</Text>
+                    <Text style={styles.reportedContent}>
+                      {selectedMessage.type === 'audio'
+                        ? `🎙️ Voice note (${selectedMessage.duration})`
+                        : selectedMessage.content}
+                    </Text>
+                  </View>
+                )}
+
+                {REPORT_REASONS.map(reason => (
+                  <TouchableOpacity
+                    key={reason.value}
+                    style={[styles.reasonRow, selectedReason === reason.value && styles.reasonRowSelected]}
+                    onPress={() => setSelectedReason(reason.value)}
+                  >
+                    <Text style={styles.reasonEmoji}>{reason.emoji}</Text>
+                    <Text style={[styles.reasonLabel, selectedReason === reason.value && styles.reasonLabelSelected]}>
+                      {reason.label}
+                    </Text>
+                    {selectedReason === reason.value && <Text style={styles.reasonCheck}>✓</Text>}
+                  </TouchableOpacity>
+                ))}
+
+                <View style={styles.reportNote}>
+                  <Text style={styles.reportNoteText}>
+                    🔒 Reports are reviewed within 24 hours. All content is kept on file for legal purposes.
                   </Text>
                 </View>
-              )}
+              </ScrollView>
 
-              {REPORT_REASONS.map(reason => (
+              <View style={styles.modalBottom}>
                 <TouchableOpacity
-                  key={reason.value}
-                  style={[
-                    styles.reasonRow,
-                    selectedReason === reason.value && styles.reasonRowSelected,
-                  ]}
-                  onPress={() => setSelectedReason(reason.value)}
+                  style={[styles.submitBtn, (!selectedReason || submittingReport) && styles.submitBtnDisabled]}
+                  onPress={handleReport}
+                  disabled={!selectedReason || submittingReport}
                 >
-                  <Text style={styles.reasonEmoji}>{reason.emoji}</Text>
-                  <Text style={[
-                    styles.reasonLabel,
-                    selectedReason === reason.value && styles.reasonLabelSelected,
-                  ]}>
-                    {reason.label}
-                  </Text>
-                  {selectedReason === reason.value && (
-                    <Text style={styles.reasonCheck}>✓</Text>
-                  )}
+                  {submittingReport ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.submitBtnText}>Submit Report</Text>}
                 </TouchableOpacity>
-              ))}
-
-              <View style={styles.reportNote}>
-                <Text style={styles.reportNoteText}>
-                  🔒 Reports are reviewed by our safety team within 24 hours.
-                  All report content is kept on file for legal purposes.
-                </Text>
               </View>
-            </ScrollView>
-          )}
-
-          {!reportSuccess && (
-            <View style={styles.modalBottom}>
-              <TouchableOpacity
-                style={[
-                  styles.submitReportBtn,
-                  (!selectedReason || submittingReport) && styles.submitReportBtnDisabled,
-                ]}
-                onPress={handleReport}
-                disabled={!selectedReason || submittingReport}
-              >
-                {submittingReport ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.submitReportBtnText}>Submit Report</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+            </>
           )}
         </SafeAreaView>
       </Modal>
@@ -386,21 +339,17 @@ export default function ChatScreen({ navigation, route }: any) {
             <Text style={styles.blockEmoji}>🚫</Text>
             <Text style={styles.blockTitle}>Block {matchedUserName}</Text>
             <Text style={styles.blockText}>
-              They will not be able to message you or find you on Versant.
-              They will not be notified that you blocked them.
+              They will not be able to message you or find you on Versant. They will not be notified.
             </Text>
             <View style={styles.blockNote}>
               <Text style={styles.blockNoteText}>
-                💡 If you are experiencing harassment please also report the specific message by long pressing on it.
+                💡 To report a specific message tap the 🚩 flag next to it.
               </Text>
             </View>
             <TouchableOpacity style={styles.blockBtn} onPress={handleBlock}>
               <Text style={styles.blockBtnText}>Yes Block {matchedUserName}</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.blockCancelBtn}
-              onPress={() => setShowBlockModal(false)}
-            >
+            <TouchableOpacity style={styles.blockCancelBtn} onPress={() => setShowBlockModal(false)}>
               <Text style={styles.blockCancelBtnText}>Never mind</Text>
             </TouchableOpacity>
           </View>
@@ -416,32 +365,21 @@ export default function ChatScreen({ navigation, route }: any) {
           <Text style={styles.topName}>{podName}</Text>
           <Text style={styles.topSub}>Photos hidden until your 15 min call</Text>
         </View>
-        <TouchableOpacity
-          style={styles.blockReportBtn}
-          onPress={() => setShowBlockModal(true)}
-        >
-          <Text style={styles.blockReportBtnText}>⋯</Text>
+        <TouchableOpacity style={styles.moreBtn} onPress={() => setShowBlockModal(true)}>
+          <Text style={styles.moreBtnText}>⋯</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Blocked Banner */}
       {isBlocked && (
         <View style={styles.blockedBanner}>
-          <Text style={styles.blockedBannerText}>
-            🚫 You have blocked this person. They can no longer contact you.
-          </Text>
+          <Text style={styles.blockedBannerText}>🚫 You have blocked this person.</Text>
         </View>
       )}
 
-      {/* Schedule Call Button */}
       {!isBlocked && (
         <TouchableOpacity
           style={styles.scheduleCallBtn}
-          onPress={() => navigation.navigate('ScheduleCall', {
-            matchId,
-            matchName: podName,
-            userId: matchedUserId,
-          })}
+          onPress={() => navigation.navigate('ScheduleCall', { matchId, matchName: podName, userId: matchedUserId })}
         >
           <Text style={styles.scheduleCallIcon}>📞</Text>
           <View style={styles.scheduleCallInfo}>
@@ -465,15 +403,12 @@ export default function ChatScreen({ navigation, route }: any) {
           contentContainerStyle={styles.messagesContent}
           onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
         >
-          {/* Ice Breakers */}
           {iceBreakers.length > 0 && (
             <View style={styles.iceBreakerCard}>
               <Text style={styles.iceBreakerTitle}>🎉 You matched! Break the ice:</Text>
               {iceBreakers.map((q, i) => (
                 <View key={i} style={styles.iceBreakerRow}>
-                  <Text style={styles.iceBreakerEmoji}>
-                    {i === 0 ? '😂' : i === 1 ? '🤔' : '😄'}
-                  </Text>
+                  <Text style={styles.iceBreakerEmoji}>{i === 0 ? '😂' : i === 1 ? '🤔' : '😄'}</Text>
                   <Text style={styles.iceBreakerText}>{q}</Text>
                 </View>
               ))}
@@ -481,7 +416,6 @@ export default function ChatScreen({ navigation, route }: any) {
           )}
 
           <Text style={styles.dateDivider}>Conversation started today</Text>
-          <Text style={styles.holdHint}>💡 Long press any message to report it</Text>
 
           {messages.map(msg => {
             if (msg.type === 'date_suggestion') {
@@ -499,12 +433,12 @@ export default function ChatScreen({ navigation, route }: any) {
 
             if (msg.type === 'audio') {
               return (
-                <TouchableOpacity
-                  key={msg.id}
-                  style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}
-                  onLongPress={() => handleLongPress(msg)}
-                  delayLongPress={400}
-                >
+                <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
+                  {msg.sender === 'them' && (
+                    <TouchableOpacity style={styles.flagBtn} onPress={() => openReport(msg)}>
+                      <Text style={styles.flagBtnText}>🚩</Text>
+                    </TouchableOpacity>
+                  )}
                   <View style={styles.audioBubble}>
                     <TouchableOpacity style={styles.playButton}>
                       <Text style={styles.playIcon}>▶</Text>
@@ -517,61 +451,44 @@ export default function ChatScreen({ navigation, route }: any) {
                     <Text style={styles.audioDuration}>{msg.duration}</Text>
                   </View>
                   {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
-                </TouchableOpacity>
+                </View>
               )
             }
 
             return (
-              <TouchableOpacity
-                key={msg.id}
-                style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}
-                onLongPress={() => handleLongPress(msg)}
-                delayLongPress={400}
-              >
+              <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
+                {msg.sender === 'them' && (
+                  <TouchableOpacity style={styles.flagBtn} onPress={() => openReport(msg)}>
+                    <Text style={styles.flagBtnText}>🚩</Text>
+                  </TouchableOpacity>
+                )}
                 <View style={[styles.bubble, msg.sender === 'me' ? styles.bubbleMe : styles.bubbleThem]}>
                   <Text style={[styles.bubbleText, msg.sender === 'me' ? styles.bubbleTextMe : styles.bubbleTextThem]}>
                     {msg.content}
                   </Text>
                 </View>
                 {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
-              </TouchableOpacity>
+              </View>
             )
           })}
 
-          {/* Deep Question */}
           {deepQuestion && (
             <View style={styles.deepQuestionCard}>
               <Text style={styles.deepQuestionLabel}>✨ Deep question</Text>
               <Text style={styles.deepQuestionText}>{deepQuestion}</Text>
-              <TouchableOpacity
-                style={styles.newQuestionBtn}
-                onPress={generateDeepQuestion}
-                disabled={loadingDeepQ}
-              >
-                <Text style={styles.newQuestionBtnText}>
-                  {loadingDeepQ ? 'Loading...' : 'Generate another →'}
-                </Text>
+              <TouchableOpacity style={styles.newQuestionBtn} onPress={generateDeepQuestion} disabled={loadingDeepQ}>
+                <Text style={styles.newQuestionBtnText}>{loadingDeepQ ? 'Loading...' : 'Generate another →'}</Text>
               </TouchableOpacity>
             </View>
           )}
         </ScrollView>
 
-        {/* Generate Deep Question Button */}
         {!deepQuestion && !isBlocked && (
-          <TouchableOpacity
-            style={styles.generateBtn}
-            onPress={generateDeepQuestion}
-            disabled={loadingDeepQ}
-          >
-            {loadingDeepQ ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Text style={styles.generateBtnText}>✨ Generate a deeper question</Text>
-            )}
+          <TouchableOpacity style={styles.generateBtn} onPress={generateDeepQuestion} disabled={loadingDeepQ}>
+            {loadingDeepQ ? <ActivityIndicator color="#FFFFFF" size="small" /> : <Text style={styles.generateBtnText}>✨ Generate a deeper question</Text>}
           </TouchableOpacity>
         )}
 
-        {/* Recording Banner */}
         {isRecording && (
           <View style={styles.recordingBanner}>
             <View style={styles.recordingDot} />
@@ -582,13 +499,10 @@ export default function ChatScreen({ navigation, route }: any) {
           </View>
         )}
 
-        {/* Input Bar */}
         {!isBlocked && (
           <View style={styles.inputBar}>
             {uploading ? (
-              <View style={styles.micButton}>
-                <ActivityIndicator color="#FFFFFF" size="small" />
-              </View>
+              <View style={styles.micButton}><ActivityIndicator color="#FFFFFF" size="small" /></View>
             ) : (
               <TouchableOpacity
                 style={[styles.micButton, isRecording && styles.micButtonRecording]}
@@ -627,9 +541,9 @@ const styles = StyleSheet.create({
   modalScroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 32, gap: 10 },
   modalSubtitle: { fontSize: 14, color: '#6B6B68', marginBottom: 8 },
   modalBottom: { padding: 20, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#EBEBEA' },
-  reportedMessagePreview: { padding: 14, borderRadius: 14, backgroundColor: '#F5F4F2', borderWidth: 1, borderColor: '#EBEBEA', marginBottom: 8 },
-  reportedMessageLabel: { fontSize: 11, fontWeight: '600', color: '#ABABAA', marginBottom: 4 },
-  reportedMessageContent: { fontSize: 14, color: '#1A1A18', lineHeight: 20 },
+  reportedPreview: { padding: 14, borderRadius: 14, backgroundColor: '#F5F4F2', borderWidth: 1, borderColor: '#EBEBEA', marginBottom: 8 },
+  reportedLabel: { fontSize: 11, fontWeight: '600', color: '#ABABAA', marginBottom: 4 },
+  reportedContent: { fontSize: 14, color: '#1A1A18', lineHeight: 20 },
   reasonRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1.5, borderColor: '#EBEBEA' },
   reasonRowSelected: { borderColor: '#C85A2A', backgroundColor: 'rgba(200,90,42,0.04)' },
   reasonEmoji: { fontSize: 22 },
@@ -638,9 +552,9 @@ const styles = StyleSheet.create({
   reasonCheck: { fontSize: 16, color: '#C85A2A', fontWeight: '700' },
   reportNote: { padding: 14, borderRadius: 14, backgroundColor: '#E8F8F2', borderWidth: 1, borderColor: '#C0EAD8', marginTop: 8 },
   reportNoteText: { fontSize: 12, color: '#1D9E75', lineHeight: 18 },
-  submitReportBtn: { height: 54, borderRadius: 16, backgroundColor: '#DC2626', alignItems: 'center', justifyContent: 'center' },
-  submitReportBtnDisabled: { backgroundColor: '#E8E8E4' },
-  submitReportBtnText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
+  submitBtn: { height: 54, borderRadius: 16, backgroundColor: '#DC2626', alignItems: 'center', justifyContent: 'center' },
+  submitBtnDisabled: { backgroundColor: '#E8E8E4' },
+  submitBtnText: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
   reportSuccess: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 14 },
   reportSuccessEmoji: { fontSize: 56 },
   reportSuccessTitle: { fontSize: 22, fontWeight: '600', color: '#1A1A18' },
@@ -662,8 +576,8 @@ const styles = StyleSheet.create({
   topCenter: { alignItems: 'center', flex: 1 },
   topName: { fontSize: 16, fontWeight: '600', color: '#1A1A18' },
   topSub: { fontSize: 11, color: '#ABABAA', marginTop: 2, textAlign: 'center' },
-  blockReportBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F5F4F2', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#EBEBEA' },
-  blockReportBtnText: { fontSize: 18, color: '#6B6B68', fontWeight: '700' },
+  moreBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#F5F4F2', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#EBEBEA' },
+  moreBtnText: { fontSize: 18, color: '#6B6B68', fontWeight: '700' },
   blockedBanner: { padding: 12, backgroundColor: '#FEF2F2', borderBottomWidth: 1, borderBottomColor: '#FECACA' },
   blockedBannerText: { fontSize: 13, color: '#DC2626', textAlign: 'center', fontWeight: '500' },
   scheduleCallBtn: { flexDirection: 'row', alignItems: 'center', gap: 12, margin: 12, padding: 16, borderRadius: 18, backgroundColor: '#C85A2A', shadowColor: '#C85A2A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 12 },
@@ -680,11 +594,12 @@ const styles = StyleSheet.create({
   iceBreakerRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   iceBreakerEmoji: { fontSize: 20, marginTop: 2 },
   iceBreakerText: { flex: 1, fontSize: 14, color: '#6B6B68', lineHeight: 22 },
-  dateDivider: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 2 },
-  holdHint: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 8 },
-  msgWrap: { maxWidth: '80%', gap: 3, alignSelf: 'flex-start' },
+  dateDivider: { textAlign: 'center', fontSize: 11, color: '#ABABAA', marginBottom: 4 },
+  msgWrap: { maxWidth: '80%', gap: 3 },
   msgWrapMe: { alignSelf: 'flex-end', alignItems: 'flex-end' },
   msgWrapThem: { alignSelf: 'flex-start', alignItems: 'flex-start' },
+  flagBtn: { alignSelf: 'flex-start', paddingHorizontal: 4, paddingVertical: 2, marginBottom: 2 },
+  flagBtnText: { fontSize: 14 },
   bubble: { padding: 14, borderRadius: 20 },
   bubbleMe: { backgroundColor: '#C85A2A', borderBottomRightRadius: 4 },
   bubbleThem: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', borderBottomLeftRadius: 4 },

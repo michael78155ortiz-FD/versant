@@ -37,6 +37,7 @@ export default function ProfileScreen({ navigation }: any) {
   const [travelCity, setTravelCity] = useState('')
   const [matchCount, setMatchCount] = useState(0)
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([])
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
   const [showBlockedModal, setShowBlockedModal] = useState(false)
   const [unblocking, setUnblocking] = useState('')
 
@@ -63,6 +64,7 @@ export default function ProfileScreen({ navigation }: any) {
       setQuizCompleted(data.quiz_completed ?? false)
       setTravelModeState(data.travel_mode ?? false)
       setTravelCity(data.travel_city ?? '')
+      setNotificationsEnabled(data.notifications_enabled ?? true)
     }
     setLoading(false)
   }
@@ -119,7 +121,7 @@ export default function ProfileScreen({ navigation }: any) {
     if (error) {
       Platform.OS === 'web' ? window.alert('Error: ' + error.message) : Alert.alert('Error', error.message)
     } else {
-      Platform.OS === 'web' ? window.alert('Saved! Your profile has been updated.') : Alert.alert('Saved ✓', 'Profile updated.')
+      Platform.OS === 'web' ? window.alert('Saved! Your profile has been updated.') : Alert.alert('Saved', 'Profile updated.')
     }
   }
 
@@ -156,7 +158,7 @@ export default function ProfileScreen({ navigation }: any) {
         const newPhotos = [...photos, urlData.publicUrl]
         await supabase.from('profiles').update({ photos: newPhotos, avatar_url: newPhotos[0] }).eq('id', user.id)
         setPhotos(newPhotos)
-        Platform.OS === 'web' ? window.alert('Photo added!') : Alert.alert('Photo added ✓')
+        Platform.OS === 'web' ? window.alert('Photo added!') : Alert.alert('Photo added')
       } catch (err: any) {
         Platform.OS === 'web' ? window.alert('Failed: ' + err.message) : Alert.alert('Error', 'Failed to upload.')
       }
@@ -180,6 +182,17 @@ export default function ProfileScreen({ navigation }: any) {
         { text: 'Remove', style: 'destructive', onPress: doDelete },
       ])
     }
+  }
+
+  async function handleToggleNotifications() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const newValue = !notificationsEnabled
+    setNotificationsEnabled(newValue)
+    await supabase
+      .from('profiles')
+      .update({ notifications_enabled: newValue })
+      .eq('id', user.id)
   }
 
   async function handleSignOut() {
@@ -245,9 +258,7 @@ export default function ProfileScreen({ navigation }: any) {
               <View style={styles.emptyBlocked}>
                 <Text style={styles.emptyBlockedEmoji}>✅</Text>
                 <Text style={styles.emptyBlockedTitle}>No blocked users</Text>
-                <Text style={styles.emptyBlockedSub}>
-                  Users you block will appear here.
-                </Text>
+                <Text style={styles.emptyBlockedSub}>Users you block will appear here.</Text>
               </View>
             ) : (
               blockedUsers.map(blocked => (
@@ -380,27 +391,43 @@ export default function ProfileScreen({ navigation }: any) {
         {/* Settings */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
-          {[
-            { icon: '📝', title: 'Compatibility Quiz', sub: quizCompleted ? 'Retake your quiz' : 'Complete your quiz', screen: 'Quiz' },
-            { icon: '✈️', title: 'Travel Mode', sub: travelMode ? `Active — ${travelCity}` : 'Find matches when traveling', screen: 'TravelMode' },
-          ].map(item => (
-            <TouchableOpacity key={item.title} style={styles.actionRow} onPress={() => navigation.navigate(item.screen)}>
-              <View style={styles.actionLeft}>
-                <Text style={styles.actionIcon}>{item.icon}</Text>
-                <View>
-                  <Text style={styles.actionTitle}>{item.title}</Text>
-                  <Text style={styles.actionSub}>{item.sub}</Text>
-                </View>
-              </View>
-              <Text style={styles.actionArrow}>→</Text>
-            </TouchableOpacity>
-          ))}
 
-          {/* Blocked Users */}
-          <TouchableOpacity
-            style={styles.actionRow}
-            onPress={() => setShowBlockedModal(true)}
-          >
+          <TouchableOpacity style={styles.actionRow} onPress={() => navigation.navigate('Quiz')}>
+            <View style={styles.actionLeft}>
+              <Text style={styles.actionIcon}>📝</Text>
+              <View>
+                <Text style={styles.actionTitle}>Compatibility Quiz</Text>
+                <Text style={styles.actionSub}>{quizCompleted ? 'Retake your quiz' : 'Complete your quiz'}</Text>
+              </View>
+            </View>
+            <Text style={styles.actionArrow}>→</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionRow} onPress={() => navigation.navigate('TravelMode')}>
+            <View style={styles.actionLeft}>
+              <Text style={styles.actionIcon}>✈️</Text>
+              <View>
+                <Text style={styles.actionTitle}>Travel Mode</Text>
+                <Text style={styles.actionSub}>{travelMode ? `Active — ${travelCity}` : 'Find matches when traveling'}</Text>
+              </View>
+            </View>
+            <Text style={styles.actionArrow}>→</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionRow} onPress={handleToggleNotifications}>
+            <View style={styles.actionLeft}>
+              <Text style={styles.actionIcon}>🔔</Text>
+              <View>
+                <Text style={styles.actionTitle}>Push Notifications</Text>
+                <Text style={styles.actionSub}>{notificationsEnabled ? 'Enabled' : 'Disabled'}</Text>
+              </View>
+            </View>
+            <Text style={[styles.actionArrow, { color: notificationsEnabled ? '#1D9E75' : '#ABABAA' }]}>
+              {notificationsEnabled ? 'On' : 'Off'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.actionRow} onPress={() => setShowBlockedModal(true)}>
             <View style={styles.actionLeft}>
               <Text style={styles.actionIcon}>🚫</Text>
               <View>

@@ -11,6 +11,7 @@ import {
 } from 'react-native'
 import { BlurView } from 'expo-blur'
 import { supabase } from '../lib/supabase'
+import { notifyNewMatch } from '../lib/notifications'
 import { useFocusEffect } from '@react-navigation/native'
 
 const MAX_MATCHES = 8
@@ -77,6 +78,7 @@ export default function DiscoverScreen({ navigation }: any) {
     })
     setMatchCount(prev => Math.min(prev + 1, MAX_MATCHES))
     setActiveMatchIds(prev => [...prev, profile.id])
+    await notifyNewMatch(profile.first_name)
   }
 
   function handlePass() {

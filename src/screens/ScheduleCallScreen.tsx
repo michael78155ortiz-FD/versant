@@ -11,116 +11,81 @@ import {
   Alert,
 } from 'react-native'
 import { supabase } from '../lib/supabase'
+import { notifyCallScheduled } from '../lib/notifications'
 
-const TIME_SLOTS = [
+const DAYS = [
+  { label: 'Today', sublabel: 'Mar 31' },
+  { label: 'Tomorrow', sublabel: 'Apr 1' },
+  { label: 'Mon', sublabel: 'Apr 2' },
+  { label: 'Tue', sublabel: 'Apr 3' },
+  { label: 'Wed', sublabel: 'Apr 4' },
+  { label: 'Thu', sublabel: 'Apr 5' },
+  { label: 'Fri', sublabel: 'Apr 6' },
+]
+
+const TIMES = [
   '8:00 AM', '9:00 AM', '10:00 AM', '11:00 AM',
   '12:00 PM', '1:00 PM', '2:00 PM', '3:00 PM',
   '4:00 PM', '5:00 PM', '6:00 PM', '7:00 PM',
   '8:00 PM', '9:00 PM', '10:00 PM',
 ]
 
-function getNextDays(count: number) {
-  const days = []
-  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  for (let i = 0; i < count; i++) {
-    const date = new Date()
-    date.setDate(date.getDate() + i)
-    days.push({
-      label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : dayNames[date.getDay()],
-      sublabel: `${monthNames[date.getMonth()]} ${date.getDate()}`,
-      date,
-    })
-  }
-  return days
-}
-
 export default function ScheduleCallScreen({ navigation, route }: any) {
+  const [selectedDay, setSelectedDay] = useState(0)
+  const [selectedTime, setSelectedTime] = useState('12:00 PM')
+  const [saving, setSaving] = useState(false)
+
   const matchId = route?.params?.matchId ?? null
   const matchName = route?.params?.matchName ?? 'Your Match'
   const userId = route?.params?.userId ?? null
 
-  const [selectedDay, setSelectedDay] = useState(0)
-  const [selectedTime, setSelectedTime] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [confirmed, setConfirmed] = useState(false)
-
-  const days = getNextDays(7)
-
   async function handleSchedule() {
-    if (!selectedTime) {
-      if (Platform.OS === 'web') {
-        window.alert('Please select a time.')
-      } else {
-        Alert.alert('Select a time', 'Please pick a time slot.')
-      }
-      return
-    }
-
     setSaving(true)
 
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
+    if (!user) {
+      setSaving(false)
+      return
+    }
 
-    const selectedDate = days[selectedDay].date
-    const [time, period] = selectedTime.split(' ')
-    const [hours, minutes] = time.split(':')
-    let hour = parseInt(hours)
-    if (period === 'PM' && hour !== 12) hour += 12
-    if (period === 'AM' && hour === 12) hour = 0
-    selectedDate.setHours(hour, parseInt(minutes), 0, 0)
+    const day = DAYS[selectedDay]
+    const scheduledAt = `${day.sublabel} 2026 ${selectedTime}`
 
     const { error } = await supabase
       .from('scheduled_calls')
       .insert({
-        match_id: matchId,
+        match_id: matchId ?? 'unknown',
         user_one: user.id,
-        user_two: userId,
-        scheduled_at: selectedDate.toISOString(),
-        status: 'pending',
+        user_two: userId ?? 'unknown',
+        scheduled_at: new Date(scheduledAt).toISOString(),
+        status: 'scheduled',
       })
-
-    setSaving(false)
 
     if (error) {
       if (Platform.OS === 'web') {
-        window.alert('Error: ' + error.message)
+        window.alert('Error scheduling call: ' + error.message)
       } else {
         Alert.alert('Error', error.message)
       }
+      setSaving(false)
       return
     }
 
-    setConfirmed(true)
-  }
+    await notifyCallScheduled(matchName, new Date(scheduledAt).toISOString())
 
-  if (confirmed) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.confirmedWrap}>
-          <Text style={styles.confirmedEmoji}>📅</Text>
-          <Text style={styles.confirmedTitle}>Call Scheduled!</Text>
-          <Text style={styles.confirmedSub}>
-            {days[selectedDay].label} · {selectedTime}
-          </Text>
-          <Text style={styles.confirmedNote}>
-            {matchName} will be notified. Your 15-minute call will unlock the reveal if you both stay on for the full time.
-          </Text>
-          <View style={styles.revealInfo}>
-            <Text style={styles.revealInfoTitle}>⏱️ How the reveal works</Text>
-            <Text style={styles.revealInfoText}>
-              Stay on the call for 15 minutes → photos automatically reveal for both of you. If either person hangs up early, photos stay hidden.
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.doneBtn}
-            onPress={() => navigation.navigate('Messages')}
-          >
-            <Text style={styles.doneBtnText}>Back to Messages →</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    )
+    setSaving(false)
+
+    if (Platform.OS === 'web') {
+      window.alert(`Call scheduled with ${matchName} on ${day.label} at ${selectedTime}`)
+    } else {
+      Alert.alert(
+        'Call Scheduled! 📞',
+        `Your call with ${matchName} is set for ${day.label} at ${selectedTime}.\n\nYou will both need to stay on for 15 minutes for photos to reveal.`,
+        [{ text: 'Got it', onPress: () => navigation.goBack() }]
+      )
+    }
+
+    navigation.goBack()
   }
 
   return (
@@ -133,195 +98,123 @@ export default function ScheduleCallScreen({ navigation, route }: any) {
         <View style={{ width: 50 }} />
       </View>
 
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scroll}
-      >
-        {/* Header */}
-        <View style={styles.matchBox}>
-          <Text style={styles.matchTitle}>Call with {matchName}</Text>
-          <Text style={styles.matchSub}>
-            Stay on for 15 minutes to unlock the photo reveal
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
+        <View style={styles.heroBox}>
+          <Text style={styles.heroIcon}>📞</Text>
+          <Text style={styles.heroTitle}>Call with {matchName}</Text>
+          <Text style={styles.heroSub}>
+            Stay on for 15 minutes together and photos reveal automatically for both of you.
           </Text>
         </View>
 
-        {/* Timer Info */}
-        <View style={styles.timerBox}>
-          <Text style={styles.timerBoxTitle}>⏱️ 15 minute minimum</Text>
-          <Text style={styles.timerBoxText}>
+        <View style={styles.ruleBox}>
+          <View style={styles.ruleRow}>
+            <Text style={styles.ruleIcon}>⏱️</Text>
+            <Text style={styles.ruleText}>15 minute minimum</Text>
+          </View>
+          <Text style={styles.ruleSub}>
             A timer runs during your call. At 15 minutes both photos automatically reveal. No contact info is ever exchanged — everything happens inside Versant.
           </Text>
         </View>
 
-        {/* Day Picker */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Pick a day</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.dayScroll}
-          >
-            {days.map((day, index) => (
-              <TouchableOpacity
-                key={index}
-                style={[
-                  styles.dayCard,
-                  selectedDay === index && styles.dayCardSelected,
-                ]}
-                onPress={() => setSelectedDay(index)}
-              >
-                <Text style={[
-                  styles.dayLabel,
-                  selectedDay === index && styles.dayLabelSelected,
-                ]}>
-                  {day.label}
-                </Text>
-                <Text style={[
-                  styles.daySubLabel,
-                  selectedDay === index && styles.daySubLabelSelected,
-                ]}>
-                  {day.sublabel}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+        <Text style={styles.sectionLabel}>Pick a day</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.daysRow}>
+          {DAYS.map((day, index) => (
+            <TouchableOpacity
+              key={index}
+              style={[styles.dayBtn, selectedDay === index && styles.dayBtnActive]}
+              onPress={() => setSelectedDay(index)}
+            >
+              <Text style={[styles.dayLabel, selectedDay === index && styles.dayLabelActive]}>
+                {day.label}
+              </Text>
+              <Text style={[styles.daySub, selectedDay === index && styles.daySubActive]}>
+                {day.sublabel}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        <Text style={styles.sectionLabel}>Pick a time</Text>
+        <View style={styles.timesGrid}>
+          {TIMES.map(time => (
+            <TouchableOpacity
+              key={time}
+              style={[styles.timeBtn, selectedTime === time && styles.timeBtnActive]}
+              onPress={() => setSelectedTime(time)}
+            >
+              <Text style={[styles.timeText, selectedTime === time && styles.timeTextActive]}>
+                {time}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
-        {/* Time Picker */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Pick a time</Text>
-          <View style={styles.timeGrid}>
-            {TIME_SLOTS.map(time => (
-              <TouchableOpacity
-                key={time}
-                style={[
-                  styles.timeSlot,
-                  selectedTime === time && styles.timeSlotSelected,
-                ]}
-                onPress={() => setSelectedTime(time)}
-              >
-                <Text style={[
-                  styles.timeSlotText,
-                  selectedTime === time && styles.timeSlotTextSelected,
-                ]}>
-                  {time}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+        <View style={styles.summaryBox}>
+          <Text style={styles.summaryTitle}>
+            📅 {DAYS[selectedDay].label} at {selectedTime}
+          </Text>
+          <Text style={styles.summarySub}>
+            with {matchName}
+          </Text>
         </View>
 
-        {/* Privacy Note */}
-        <View style={styles.privacyBox}>
+        <View style={styles.privacyNote}>
           <Text style={styles.privacyText}>
             🔒 No phone numbers or contact info is ever shared. Your call happens entirely inside Versant.
           </Text>
         </View>
-      </ScrollView>
 
-      {/* Schedule Button */}
-      <View style={styles.bottomArea}>
         <TouchableOpacity
-          style={[
-            styles.scheduleBtn,
-            !selectedTime && styles.scheduleBtnDisabled,
-          ]}
+          style={[styles.scheduleBtn, saving && styles.scheduleBtnDisabled]}
           onPress={handleSchedule}
-          disabled={saving || !selectedTime}
+          disabled={saving}
         >
           {saving ? (
             <ActivityIndicator color="#FFFFFF" />
           ) : (
-            <Text style={styles.scheduleBtnText}>
-              {selectedTime
-                ? `Schedule for ${days[selectedDay].label} · ${selectedTime}`
-                : 'Select a time to continue'}
-            </Text>
+            <Text style={styles.scheduleBtnText}>Confirm Call Schedule →</Text>
           )}
         </TouchableOpacity>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   )
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FAFAF8' },
-  topBar: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 20, paddingVertical: 14, backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1, borderBottomColor: '#EBEBEA',
-  },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
   backText: { fontSize: 15, color: '#C85A2A', fontWeight: '500' },
-  topTitle: { fontSize: 17, fontWeight: '600', color: '#1A1A18' },
-  scroll: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 32, gap: 16 },
-  matchBox: {
-    padding: 16, borderRadius: 16, backgroundColor: '#FDF0EB',
-    borderWidth: 1, borderColor: '#F2D4C8', gap: 4,
-  },
-  matchTitle: { fontSize: 15, fontWeight: '600', color: '#C85A2A' },
-  matchSub: { fontSize: 12, color: '#C85A2A', opacity: 0.8 },
-  timerBox: {
-    padding: 16, borderRadius: 16, backgroundColor: '#FFFFFF',
-    borderWidth: 1, borderColor: '#EBEBEA', gap: 8,
-  },
-  timerBoxTitle: { fontSize: 14, fontWeight: '600', color: '#1A1A18' },
-  timerBoxText: { fontSize: 13, color: '#6B6B68', lineHeight: 20 },
-  section: { gap: 12 },
-  sectionTitle: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
-  dayScroll: { gap: 8, paddingRight: 4 },
-  dayCard: {
-    alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16,
-    borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: 1.5,
-    borderColor: '#EBEBEA', minWidth: 72,
-  },
-  dayCardSelected: { backgroundColor: 'rgba(200,90,42,0.08)', borderColor: '#C85A2A' },
+  topTitle: { fontSize: 16, fontWeight: '600', color: '#1A1A18' },
+  scroll: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 48, gap: 16 },
+  heroBox: { alignItems: 'center', padding: 24, backgroundColor: '#FFFFFF', borderRadius: 20, borderWidth: 1, borderColor: '#EBEBEA', gap: 8 },
+  heroIcon: { fontSize: 48 },
+  heroTitle: { fontSize: 20, fontWeight: '600', color: '#1A1A18', textAlign: 'center' },
+  heroSub: { fontSize: 13, color: '#6B6B68', textAlign: 'center', lineHeight: 20 },
+  ruleBox: { padding: 16, borderRadius: 16, backgroundColor: '#FDF0EB', borderWidth: 1, borderColor: '#F2D4C8', gap: 8 },
+  ruleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  ruleIcon: { fontSize: 18 },
+  ruleText: { fontSize: 15, fontWeight: '600', color: '#C85A2A' },
+  ruleSub: { fontSize: 13, color: '#C85A2A', opacity: 0.8, lineHeight: 20 },
+  sectionLabel: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
+  daysRow: { gap: 8, paddingRight: 4 },
+  dayBtn: { alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 14, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#EBEBEA', minWidth: 72 },
+  dayBtnActive: { backgroundColor: '#C85A2A', borderColor: '#C85A2A' },
   dayLabel: { fontSize: 13, fontWeight: '600', color: '#1A1A18' },
-  dayLabelSelected: { color: '#C85A2A' },
-  daySubLabel: { fontSize: 11, color: '#ABABAA', marginTop: 2 },
-  daySubLabelSelected: { color: '#C85A2A', opacity: 0.7 },
-  timeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  timeSlot: {
-    paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12,
-    backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#EBEBEA',
-  },
-  timeSlotSelected: { backgroundColor: 'rgba(200,90,42,0.08)', borderColor: '#C85A2A' },
-  timeSlotText: { fontSize: 13, fontWeight: '500', color: '#6B6B68' },
-  timeSlotTextSelected: { color: '#C85A2A', fontWeight: '600' },
-  privacyBox: {
-    padding: 14, borderRadius: 14, backgroundColor: '#F5F4F2',
-    borderWidth: 1, borderColor: '#EBEBEA',
-  },
-  privacyText: { fontSize: 12, color: '#6B6B68', lineHeight: 18 },
-  bottomArea: {
-    padding: 20, backgroundColor: '#FFFFFF',
-    borderTopWidth: 1, borderTopColor: '#EBEBEA',
-  },
-  scheduleBtn: {
-    height: 54, borderRadius: 16, backgroundColor: '#C85A2A',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  scheduleBtnDisabled: { backgroundColor: '#E8E8E4' },
-  scheduleBtnText: { fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
-  confirmedWrap: {
-    flex: 1, alignItems: 'center', justifyContent: 'center',
-    padding: 32, gap: 14,
-  },
-  confirmedEmoji: { fontSize: 56 },
-  confirmedTitle: { fontSize: 24, fontWeight: '600', color: '#1A1A18', letterSpacing: -0.3 },
-  confirmedSub: { fontSize: 16, fontWeight: '500', color: '#C85A2A' },
-  confirmedNote: {
-    fontSize: 14, color: '#6B6B68', textAlign: 'center',
-    lineHeight: 22, paddingHorizontal: 8,
-  },
-  revealInfo: {
-    width: '100%', padding: 16, borderRadius: 16,
-    backgroundColor: '#FDF0EB', borderWidth: 1, borderColor: '#F2D4C8', gap: 6,
-  },
-  revealInfoTitle: { fontSize: 13, fontWeight: '600', color: '#C85A2A' },
-  revealInfoText: { fontSize: 12, color: '#C85A2A', opacity: 0.8, lineHeight: 18 },
-  doneBtn: {
-    height: 52, paddingHorizontal: 32, borderRadius: 16,
-    backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center',
-  },
-  doneBtnText: { fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
+  dayLabelActive: { color: '#FFFFFF' },
+  daySub: { fontSize: 11, color: '#ABABAA', marginTop: 2 },
+  daySubActive: { color: 'rgba(255,255,255,0.8)' },
+  timesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  timeBtn: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12, backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#EBEBEA' },
+  timeBtnActive: { backgroundColor: '#C85A2A', borderColor: '#C85A2A' },
+  timeText: { fontSize: 13, fontWeight: '500', color: '#1A1A18' },
+  timeTextActive: { color: '#FFFFFF', fontWeight: '600' },
+  summaryBox: { padding: 16, borderRadius: 16, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA', alignItems: 'center', gap: 4 },
+  summaryTitle: { fontSize: 16, fontWeight: '600', color: '#1A1A18' },
+  summarySub: { fontSize: 13, color: '#6B6B68' },
+  privacyNote: { padding: 14, borderRadius: 14, backgroundColor: '#E8F8F2', borderWidth: 1, borderColor: '#C0EAD8' },
+  privacyText: { fontSize: 12, color: '#1D9E75', lineHeight: 18 },
+  scheduleBtn: { height: 56, borderRadius: 18, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center', shadowColor: '#C85A2A', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.25, shadowRadius: 12 },
+  scheduleBtnDisabled: { opacity: 0.5 },
+  scheduleBtnText: { fontSize: 17, fontWeight: '600', color: '#FFFFFF', letterSpacing: -0.2 },
 })

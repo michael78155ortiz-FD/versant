@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { NavigationContainer } from '@react-navigation/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
+import { View, ActivityIndicator } from 'react-native'
 import { supabase } from '../lib/supabase'
 import { Session } from '@supabase/supabase-js'
+import * as Notifications from 'expo-notifications'
+import { registerForPushNotifications, savePushToken } from '../lib/notifications'
 
 import WelcomeScreen from '../screens/WelcomeScreen'
 import SignUpScreen from '../screens/SignUpScreen'
@@ -24,22 +27,73 @@ const Stack = createNativeStackNavigator()
 export default function Navigation() {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
+  const navigationRef = useRef<any>(null)
+  const notificationListener = useRef<any>()
+  const responseListener = useRef<any>()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       setLoading(false)
     })
+
     supabase.auth.onAuthStateChange((_event, session) => {
+      if (_event === 'SIGNED_IN' && !session) return
       setSession(session)
+      if (session) {
+        setupPushNotifications()
+      }
     })
   }, [])
 
-  if (loading) return null
+  useEffect(() => {
+    if (session) {
+      setupPushNotifications()
+    }
+  }, [session])
+
+  async function setupPushNotifications() {
+    const token = await registerForPushNotifications()
+    if (token) {
+      await savePushToken(token)
+    }
+
+    notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
+      console.log('Notification received:', notification)
+    })
+
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data
+      if (data?.screen && navigationRef.current) {
+        if (data.screen === 'Messages') {
+          navigationRef.current.navigate('Messages')
+        } else if (data.screen === 'Chat' && data.matchId) {
+          navigationRef.current.navigate('Messages')
+        }
+      }
+    })
+
+    return () => {
+      if (notificationListener.current) {
+        Notifications.removeNotificationSubscription(notificationListener.current)
+      }
+      if (responseListener.current) {
+        Notifications.removeNotificationSubscription(responseListener.current)
+      }
+    }
+  }
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' }}>
+        <ActivityIndicator color="#C85A2A" size="large" />
+      </View>
+    )
+  }
 
   return (
-    <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <NavigationContainer ref={navigationRef}>
+      <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
         {session ? (
           <>
             <Stack.Screen name="Discover" component={DiscoverScreen} />
