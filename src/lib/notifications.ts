@@ -12,6 +12,9 @@ Notifications.setNotificationHandler({
 })
 
 export async function registerForPushNotifications(): Promise<string | null> {
+  // Not supported on web
+  if (Platform.OS === 'web') return null
+
   if (!Device.isDevice) {
     console.log('Push notifications only work on real devices')
     return null
@@ -44,6 +47,7 @@ export async function registerForPushNotifications(): Promise<string | null> {
 }
 
 export async function savePushToken(token: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   await supabase
@@ -58,6 +62,7 @@ export async function sendPushNotification(
   body: string,
   data?: object
 ) {
+  if (Platform.OS === 'web') return
   await fetch('https://exp.host/--/api/v2/push/send', {
     method: 'POST',
     headers: {
@@ -76,6 +81,7 @@ export async function sendPushNotification(
 }
 
 export async function notifyNewMatch(matchedUserName: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   const { data: profile } = await supabase
@@ -93,6 +99,7 @@ export async function notifyNewMatch(matchedUserName: string) {
 }
 
 export async function notifyNewMessage(senderName: string, matchId: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   const { data: profile } = await supabase
@@ -110,6 +117,7 @@ export async function notifyNewMessage(senderName: string, matchId: string) {
 }
 
 export async function notifyCallScheduled(schedulerName: string, scheduledAt: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   const { data: profile } = await supabase
@@ -128,6 +136,7 @@ export async function notifyCallScheduled(schedulerName: string, scheduledAt: st
 }
 
 export async function notifyCallReminder(matchName: string, scheduledAt: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   const { data: profile } = await supabase
@@ -146,6 +155,7 @@ export async function notifyCallReminder(matchName: string, scheduledAt: string)
 }
 
 export async function notifyPhotosRevealed(matchName: string) {
+  if (Platform.OS === 'web') return
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return
   const { data: profile } = await supabase
