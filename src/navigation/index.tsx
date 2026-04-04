@@ -6,6 +6,7 @@ import { supabase } from '../lib/supabase'
 import { Session } from '@supabase/supabase-js'
 import * as Notifications from 'expo-notifications'
 import { registerForPushNotifications, savePushToken } from '../lib/notifications'
+import Purchases, { LOG_LEVEL } from 'react-native-purchases'
 
 import WelcomeScreen from '../screens/WelcomeScreen'
 import SignUpScreen from '../screens/SignUpScreen'
@@ -32,6 +33,12 @@ export default function Navigation() {
   const responseListener = useRef<any>()
 
   useEffect(() => {
+    // Initialize RevenueCat
+    Purchases.setLogLevel(LOG_LEVEL.VERBOSE)
+    Purchases.configure({
+      apiKey: process.env.EXPO_PUBLIC_REVENUECAT_API_KEY!,
+    })
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       setLoading(false)
@@ -42,6 +49,10 @@ export default function Navigation() {
       setSession(session)
       if (session) {
         setupPushNotifications()
+        // Identify user in RevenueCat
+        if (session.user?.id) {
+          Purchases.logIn(session.user.id)
+        }
       }
     })
   }, [])
