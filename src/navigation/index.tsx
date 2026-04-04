@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { NavigationContainer } from '@react-navigation/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
-import { View, ActivityIndicator } from 'react-native'
+import { View, ActivityIndicator, Platform } from 'react-native'
 import { supabase } from '../lib/supabase'
 import { Session } from '@supabase/supabase-js'
 import * as Notifications from 'expo-notifications'
@@ -33,11 +33,13 @@ export default function Navigation() {
   const responseListener = useRef<any>()
 
   useEffect(() => {
-    // Initialize RevenueCat
-    Purchases.setLogLevel(LOG_LEVEL.VERBOSE)
-    Purchases.configure({
-      apiKey: process.env.EXPO_PUBLIC_REVENUECAT_API_KEY!,
-    })
+    // Initialize RevenueCat — iOS only, not web
+    if (Platform.OS !== 'web') {
+      Purchases.setLogLevel(LOG_LEVEL.VERBOSE)
+      Purchases.configure({
+        apiKey: process.env.EXPO_PUBLIC_REVENUECAT_API_KEY!,
+      })
+    }
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
@@ -49,8 +51,8 @@ export default function Navigation() {
       setSession(session)
       if (session) {
         setupPushNotifications()
-        // Identify user in RevenueCat
-        if (session.user?.id) {
+        // Identify user in RevenueCat — iOS only
+        if (session.user?.id && Platform.OS !== 'web') {
           Purchases.logIn(session.user.id)
         }
       }
