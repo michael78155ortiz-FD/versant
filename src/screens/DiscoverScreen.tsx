@@ -8,13 +8,16 @@ import {
   ScrollView,
   Platform,
   Image,
+  Alert,
 } from 'react-native'
 import { BlurView } from 'expo-blur'
 import { supabase } from '../lib/supabase'
 import { notifyNewMatch } from '../lib/notifications'
 import { useFocusEffect } from '@react-navigation/native'
+import Purchases from 'react-native-purchases'
 
 const MAX_MATCHES = 8
+const FREE_SWIPES_PER_DAY = 5
 
 const MOCK_PROFILES = [
   { id: 'mock1', first_name: 'Maya', age: 27, city: 'New York', profession: 'Architect', distance: '2.1 mi', talk_time: 12, total_time: 20, compatibility: 87, values: ['Ambition-driven', 'Family first', 'Outdoorsy'], bg: '#E8D5C4' },
@@ -31,45 +34,103 @@ export default function DiscoverScreen({ navigation }: any) {
   const [travelCity, setTravelCity] = useState('')
   const [activeMatchIds, setActiveMatchIds] = useState<string[]>([])
   const [seenIds, setSeenIds] = useState<string[]>([])
+  const [swipesUsed, setSwipesUsed] = useState(0)
+  const [isPaid, setIsPaid] = useState(false)
+  const [swipeLimitHit, setSwipeLimitHit] = useState(false)
 
   const unavailableIds = [...new Set([...activeMatchIds, ...seenIds])]
   const remainingProfiles = MOCK_PROFILES.filter(p => !unavailableIds.includes(p.id))
   const profile = remainingProfiles[0] ?? null
-  const atLimit = matchCount >= MAX_MATCHES
+  const atMatchLimit = matchCount >= MAX_MATCHES
+  const atSwipeLimit = !isPaid && swipesUsed >= FREE_SWIPES_PER_DAY
   const progressPercent = profile ? (profile.talk_time / profile.total_time) * 100 : 0
   const activeCity = travelMode && travelCity ? travelCity : userCity
 
   useFocusEffect(
     useCallback(() => {
       loadUserData()
+      checkSubscription()
     }, [])
   )
+
+  async function checkSubscription() {
+    try {
+      const info = await Purchases.getCustomerInfo()
+      const active = info.entitlements.active
+      setIsPaid(Object.keys(active).length > 0)
+    } catch (e) {
+      setIsPaid(false)
+    }
+  }
 
   async function loadUserData() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-    const [matchRes, profileRes] = await Promise.all([
+
+    const [matchRes, profileRes, swipeRes] = await Promise.all([
       supabase.from('matches').select('matched_user_id').eq('user_id', user.id).eq('status', 'active'),
       supabase.from('profiles').select('city, travel_mode, travel_city').eq('id', user.id).single(),
+      supabase.from('swipe_limits').select('swipes_used, last_swipe_at').eq('user_id', user.id).single(),
     ])
+
     const ids = (matchRes.data ?? []).map((m: any) => m.matched_user_id)
     setActiveMatchIds(ids)
     setMatchCount(ids.length)
+
     if (profileRes.data) {
       setUserCity(profileRes.data.city ?? '')
       setTravelMode(profileRes.data.travel_mode ?? false)
       setTravelCity(profileRes.data.travel_city ?? '')
     }
+
+    if (swipeRes.data) {
+      const lastSwipe = new Date(swipeRes.data.last_swipe_at)
+      const now = new Date()
+      const hoursSinceLastSwipe = (now.getTime() - lastSwipe.getTime()) / (1000 * 60 * 60)
+      if (hoursSinceLastSwipe >= 24) {
+        // Reset swipes
+        await supabase.from('swipe_limits').update({ swipes_used: 0, last_swipe_at: now.toISOString() }).eq('user_id', user.id)
+        setSwipesUsed(0)
+        setSwipeLimitHit(false)
+      } else {
+        setSwipesUsed(swipeRes.data.swipes_used)
+        setSwipeLimitHit(swipeRes.data.swipes_used >= FREE_SWIPES_PER_DAY)
+      }
+    }
+  }
+
+  async function recordSwipe() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    const newCount = swipesUsed + 1
+    setSwipesUsed(newCount)
+
+    const { data: existing } = await supabase.from('swipe_limits').select('id').eq('user_id', user.id).single()
+    if (existing) {
+      await supabase.from('swipe_limits').update({ swipes_used: newCount, last_swipe_at: new Date().toISOString() }).eq('user_id', user.id)
+    } else {
+      await supabase.from('swipe_limits').insert({ user_id: user.id, swipes_used: newCount, last_swipe_at: new Date().toISOString() })
+    }
+
+    if (newCount >= FREE_SWIPES_PER_DAY) {
+      setSwipeLimitHit(true)
+    }
   }
 
   async function handleMatch() {
-    if (atLimit) {
-      if (Platform.OS === 'web') window.alert('You reached your 8 match limit. Go to Messages to unmatch someone.')
+    if (atMatchLimit) {
+      Alert.alert('Match limit reached', 'Go to Messages to unmatch someone.')
+      return
+    }
+    if (atSwipeLimit) {
+      navigation.navigate('Paywall')
       return
     }
     if (!profile) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
+
     await supabase.from('matches').insert({
       user_id: user.id,
       matched_user_id: profile.id,
@@ -79,11 +140,17 @@ export default function DiscoverScreen({ navigation }: any) {
     setMatchCount(prev => Math.min(prev + 1, MAX_MATCHES))
     setActiveMatchIds(prev => [...prev, profile.id])
     await notifyNewMatch(profile.first_name)
+    await recordSwipe()
   }
 
   function handlePass() {
+    if (atSwipeLimit) {
+      navigation.navigate('Paywall')
+      return
+    }
     if (!profile) return
     setSeenIds(prev => [...prev, profile.id])
+    recordSwipe()
   }
 
   return (
@@ -117,7 +184,28 @@ export default function DiscoverScreen({ navigation }: any) {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-        {atLimit && (
+
+        {/* Swipe Limit Banner */}
+        {atSwipeLimit && !isPaid && (
+          <View style={styles.swipeLimitBanner}>
+            <Text style={styles.swipeLimitTitle}>Daily swipes used 🔒</Text>
+            <Text style={styles.swipeLimitSub}>Upgrade to get unlimited swipes every day.</Text>
+            <TouchableOpacity style={styles.swipeLimitBtn} onPress={() => navigation.navigate('Paywall')}>
+              <Text style={styles.swipeLimitBtnText}>Upgrade to Versant+ →</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Free swipes counter */}
+        {!isPaid && !atSwipeLimit && (
+          <View style={styles.swipeCounter}>
+            <Text style={styles.swipeCounterText}>
+              {FREE_SWIPES_PER_DAY - swipesUsed} free swipes left today
+            </Text>
+          </View>
+        )}
+
+        {atMatchLimit && (
           <View style={styles.limitBanner}>
             <Text style={styles.limitBannerTitle}>8 active matches</Text>
             <Text style={styles.limitBannerSub}>Go to Messages to unmatch someone.</Text>
@@ -137,7 +225,7 @@ export default function DiscoverScreen({ navigation }: any) {
             </TouchableOpacity>
           </View>
         ) : profile ? (
-          <View style={[styles.card, atLimit && styles.cardDimmed]}>
+          <View style={[styles.card, atMatchLimit && styles.cardDimmed]}>
             <View style={[styles.photoArea, { backgroundColor: profile.bg }]}>
               <BlurView intensity={80} style={styles.blurOverlay}>
                 <View style={styles.silhouetteCircle}>
@@ -187,10 +275,12 @@ export default function DiscoverScreen({ navigation }: any) {
                   <Text style={styles.passButtonText}>Pass</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.matchButton, atLimit && styles.matchButtonDisabled]}
+                  style={[styles.matchButton, (atMatchLimit || atSwipeLimit) && styles.matchButtonDisabled]}
                   onPress={handleMatch}
                 >
-                  <Text style={styles.matchButtonText}>{atLimit ? '🔒 Limit Reached' : '💛 Match'}</Text>
+                  <Text style={styles.matchButtonText}>
+                    {atMatchLimit ? '🔒 Limit Reached' : atSwipeLimit ? '🔒 Upgrade' : '💛 Match'}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -234,6 +324,13 @@ const styles = StyleSheet.create({
   matchDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#EBEBEA', borderWidth: 1, borderColor: '#E0DDD8' },
   matchDotFilled: { backgroundColor: '#C85A2A', borderColor: '#C85A2A' },
   scroll: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 32 },
+  swipeLimitBanner: { backgroundColor: '#FDF0EB', borderRadius: 16, borderWidth: 1, borderColor: '#F2D4C8', padding: 16, marginBottom: 16, gap: 6 },
+  swipeLimitTitle: { fontSize: 14, fontWeight: '600', color: '#C85A2A' },
+  swipeLimitSub: { fontSize: 12, color: '#C85A2A', opacity: 0.8 },
+  swipeLimitBtn: { marginTop: 6, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20, backgroundColor: '#C85A2A' },
+  swipeLimitBtnText: { fontSize: 12, fontWeight: '600', color: '#FFFFFF' },
+  swipeCounter: { alignItems: 'center', marginBottom: 12 },
+  swipeCounterText: { fontSize: 12, color: '#ABABAA', fontWeight: '500' },
   limitBanner: { backgroundColor: '#FEF2F2', borderRadius: 16, borderWidth: 1, borderColor: '#FECACA', padding: 16, marginBottom: 16, gap: 6 },
   limitBannerTitle: { fontSize: 14, fontWeight: '600', color: '#DC2626' },
   limitBannerSub: { fontSize: 12, color: '#DC2626', opacity: 0.8 },
