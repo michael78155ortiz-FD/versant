@@ -28,10 +28,12 @@ const REPORT_REASONS = [
 export default function ChatScreen({ navigation, route }: any) {
   const [message, setMessage] = useState('')
   const [messages, setMessages] = useState<any[]>([])
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [recording, setRecording] = useState<Audio.Recording | null>(null)
   const [isRecording, setIsRecording] = useState(false)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [uploading, setUploading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [iceBreakers, setIceBreakers] = useState<string[]>([])
   const [deepQuestion, setDeepQuestion] = useState<string | null>(null)
   const [loadingDeepQ, setLoadingDeepQ] = useState(false)
@@ -45,6 +47,7 @@ export default function ChatScreen({ navigation, route }: any) {
   const [isBlocked, setIsBlocked] = useState(false)
   const scrollRef = useRef<ScrollView>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const subscriptionRef = useRef<any>(null)
 
   const podName = route?.params?.pod?.name ?? route?.params?.match?.matched_user_name ?? 'Your Match'
   const matchId = route?.params?.match?.id ?? route?.params?.pod?.id ?? null
@@ -52,22 +55,81 @@ export default function ChatScreen({ navigation, route }: any) {
   const matchedUserName = route?.params?.match?.matched_user_name ?? 'Your Match'
 
   useEffect(() => {
-    loadIceBreakers()
-    loadDateSuggestions()
-    checkIfBlocked()
+    initChat()
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (recording) recording.stopAndUnloadAsync()
+      if (subscriptionRef.current) subscriptionRef.current.unsubscribe()
     }
   }, [])
 
-  async function checkIfBlocked() {
+  async function initChat() {
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user || !matchedUserId) return
+    if (!user) return
+    setCurrentUserId(user.id)
+    await Promise.all([
+      loadMessages(user.id),
+      loadIceBreakers(),
+      checkIfBlocked(user.id),
+    ])
+    setupRealtime(user.id)
+    setLoading(false)
+  }
+
+  async function loadMessages(userId: string) {
+    if (!matchId) return
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('match_id', matchId)
+      .order('created_at', { ascending: true })
+    if (error) { console.error('Load messages error:', error); return }
+    if (data) {
+      const formatted = data.map(m => formatMessage(m, userId))
+      setMessages(formatted)
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100)
+    }
+  }
+
+  function formatMessage(m: any, userId: string) {
+    return {
+      id: m.id,
+      type: m.type ?? 'text',
+      sender: m.sender_id === userId ? 'me' : 'them',
+      content: m.content,
+      duration: m.duration,
+      time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      raw: m,
+    }
+  }
+
+  function setupRealtime(userId: string) {
+    if (!matchId) return
+    subscriptionRef.current = supabase
+      .channel(`messages:${matchId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `match_id=eq.${matchId}`,
+      }, (payload) => {
+        const newMsg = formatMessage(payload.new, userId)
+        setMessages(prev => {
+          // Avoid duplicates
+          if (prev.find(m => m.id === newMsg.id)) return prev
+          return [...prev, newMsg]
+        })
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
+      })
+      .subscribe()
+  }
+
+  async function checkIfBlocked(userId: string) {
+    if (!matchedUserId) return
     const { data } = await supabase
       .from('blocked_users')
       .select('id')
-      .eq('blocker_id', user.id)
+      .eq('blocker_id', userId)
       .eq('blocked_id', matchedUserId)
       .single()
     if (data) setIsBlocked(true)
@@ -86,26 +148,6 @@ export default function ChatScreen({ navigation, route }: any) {
     }
   }
 
-  async function loadDateSuggestions() {
-    if (!matchId) return
-    const { data } = await supabase
-      .from('date_suggestions')
-      .select('*')
-      .eq('match_id', matchId)
-      .order('created_at', { ascending: true })
-    if (data && data.length > 0) {
-      const suggestionMessages = data.map(s => ({
-        id: `suggestion_${s.id}`,
-        type: 'date_suggestion',
-        sender: 'me',
-        venue_name: s.venue_name,
-        venue_address: s.venue_address,
-        time: new Date(s.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      }))
-      setMessages(prev => [...prev, ...suggestionMessages])
-    }
-  }
-
   async function generateDeepQuestion() {
     setLoadingDeepQ(true)
     const { data } = await supabase
@@ -120,6 +162,23 @@ export default function ChatScreen({ navigation, route }: any) {
       setShownQuestionIds(prev => [...prev, picked.id])
     }
     setLoadingDeepQ(false)
+  }
+
+  async function handleSend() {
+    if (!message.trim() || !matchId || !currentUserId) return
+    const content = message.trim()
+    setMessage('')
+
+    const { error } = await supabase.from('messages').insert({
+      match_id: matchId,
+      sender_id: currentUserId,
+      receiver_id: matchedUserId,
+      content,
+      type: 'text',
+    })
+
+    if (error) console.error('Send message error:', error)
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
   }
 
   async function handleBlock() {
@@ -198,7 +257,7 @@ export default function ChatScreen({ navigation, route }: any) {
   }
 
   async function stopRecording() {
-    if (!recording) return
+    if (!recording || !currentUserId || !matchId) return
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
     setIsRecording(false)
     setUploading(true)
@@ -207,41 +266,25 @@ export default function ChatScreen({ navigation, route }: any) {
       const uri = recording.getURI()
       setRecording(null)
       if (uri) {
-        const { data: { user } } = await supabase.auth.getUser()
-        if (!user) return
-        const fileName = `voice/${user.id}/${Date.now()}.m4a`
+        const fileName = `voice/${currentUserId}/${Date.now()}.m4a`
         const response = await fetch(uri)
         const blob = await response.blob()
         await supabase.storage.from('voice-notes').upload(fileName, blob, { contentType: 'audio/m4a', upsert: true })
         const mins = Math.floor(recordingDuration / 60)
         const secs = recordingDuration % 60
-        const newMsg = {
-          id: Date.now().toString(),
+        const duration = `${mins}:${secs.toString().padStart(2, '0')}`
+        await supabase.from('messages').insert({
+          match_id: matchId,
+          sender_id: currentUserId,
+          receiver_id: matchedUserId,
           type: 'audio',
-          sender: 'me',
-          duration: `${mins}:${secs.toString().padStart(2, '0')}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }
-        setMessages(prev => [...prev, newMsg])
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
+          content: fileName,
+          duration,
+        })
       }
     } catch (err) { console.error(err) }
     setUploading(false)
     setRecordingDuration(0)
-  }
-
-  function handleSend() {
-    if (!message.trim()) return
-    const newMsg = {
-      id: Date.now().toString(),
-      type: 'text',
-      sender: 'me',
-      content: message.trim(),
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    }
-    setMessages(prev => [...prev, newMsg])
-    setMessage('')
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100)
   }
 
   function openReport(msg: any) {
@@ -249,6 +292,14 @@ export default function ChatScreen({ navigation, route }: any) {
     setReportSuccess(false)
     setSelectedReason('')
     setShowReportModal(true)
+  }
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' }}>
+        <ActivityIndicator color="#C85A2A" size="large" />
+      </View>
+    )
   }
 
   return (
@@ -263,7 +314,6 @@ export default function ChatScreen({ navigation, route }: any) {
               <Text style={styles.modalClose}>Close</Text>
             </TouchableOpacity>
           </View>
-
           {reportSuccess ? (
             <View style={styles.reportSuccess}>
               <Text style={styles.reportSuccessEmoji}>✅</Text>
@@ -279,7 +329,6 @@ export default function ChatScreen({ navigation, route }: any) {
             <>
               <ScrollView contentContainerStyle={styles.modalScroll}>
                 <Text style={styles.modalSubtitle}>What is the reason for this report?</Text>
-
                 {selectedMessage && (
                   <View style={styles.reportedPreview}>
                     <Text style={styles.reportedLabel}>Reported message:</Text>
@@ -290,7 +339,6 @@ export default function ChatScreen({ navigation, route }: any) {
                     </Text>
                   </View>
                 )}
-
                 {REPORT_REASONS.map(reason => (
                   <TouchableOpacity
                     key={reason.value}
@@ -304,14 +352,12 @@ export default function ChatScreen({ navigation, route }: any) {
                     {selectedReason === reason.value && <Text style={styles.reasonCheck}>✓</Text>}
                   </TouchableOpacity>
                 ))}
-
                 <View style={styles.reportNote}>
                   <Text style={styles.reportNoteText}>
                     🔒 Reports are reviewed within 24 hours. All content is kept on file for legal purposes.
                   </Text>
                 </View>
               </ScrollView>
-
               <View style={styles.modalBottom}>
                 <TouchableOpacity
                   style={[styles.submitBtn, (!selectedReason || submittingReport) && styles.submitBtnDisabled]}
@@ -403,7 +449,7 @@ export default function ChatScreen({ navigation, route }: any) {
           contentContainerStyle={styles.messagesContent}
           onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
         >
-          {iceBreakers.length > 0 && (
+          {iceBreakers.length > 0 && messages.length === 0 && (
             <View style={styles.iceBreakerCard}>
               <Text style={styles.iceBreakerTitle}>🎉 You matched! Break the ice:</Text>
               {iceBreakers.map((q, i) => (
@@ -418,19 +464,6 @@ export default function ChatScreen({ navigation, route }: any) {
           <Text style={styles.dateDivider}>Conversation started today</Text>
 
           {messages.map(msg => {
-            if (msg.type === 'date_suggestion') {
-              return (
-                <View key={msg.id} style={[styles.msgWrap, styles.msgWrapMe]}>
-                  <View style={styles.dateSuggestionCard}>
-                    <Text style={styles.dateSuggestionLabel}>📅 Date suggestion sent</Text>
-                    <Text style={styles.dateSuggestionVenue}>{msg.venue_name}</Text>
-                    <Text style={styles.dateSuggestionAddress}>📍 {msg.venue_address}</Text>
-                  </View>
-                  {msg.time && <Text style={styles.msgTime}>{msg.time}</Text>}
-                </View>
-              )
-            }
-
             if (msg.type === 'audio') {
               return (
                 <View key={msg.id} style={[styles.msgWrap, msg.sender === 'me' ? styles.msgWrapMe : styles.msgWrapThem]}>
@@ -606,10 +639,6 @@ const styles = StyleSheet.create({
   bubbleText: { fontSize: 15, lineHeight: 22 },
   bubbleTextMe: { color: '#FFFFFF' },
   bubbleTextThem: { color: '#1A1A18' },
-  dateSuggestionCard: { padding: 14, borderRadius: 16, backgroundColor: '#FDF0EB', borderWidth: 1.5, borderColor: '#C85A2A', gap: 4, maxWidth: 280 },
-  dateSuggestionLabel: { fontSize: 11, fontWeight: '600', color: '#C85A2A', marginBottom: 4 },
-  dateSuggestionVenue: { fontSize: 15, fontWeight: '600', color: '#1A1A18' },
-  dateSuggestionAddress: { fontSize: 12, color: '#6B6B68' },
   audioBubble: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 20, borderBottomLeftRadius: 4, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#EBEBEA' },
   playButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#C85A2A', alignItems: 'center', justifyContent: 'center' },
   playIcon: { fontSize: 12, color: '#FFFFFF', marginLeft: 2 },

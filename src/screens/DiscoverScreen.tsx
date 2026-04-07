@@ -6,59 +6,53 @@ import {
   TouchableOpacity,
   SafeAreaView,
   ScrollView,
-  Platform,
   Image,
   Alert,
+  ActivityIndicator,
 } from 'react-native'
 import { BlurView } from 'expo-blur'
 import { supabase } from '../lib/supabase'
 import { notifyNewMatch } from '../lib/notifications'
 import { useFocusEffect } from '@react-navigation/native'
 import Purchases from 'react-native-purchases'
+import { rankProfiles, UserProfile } from '../lib/matching'
 
 const MAX_MATCHES = 8
 const FREE_SWIPES_PER_DAY = 5
 
-const MOCK_PROFILES = [
-  { id: 'mock1', first_name: 'Maya', age: 27, city: 'New York', profession: 'Architect', distance: '2.1 mi', talk_time: 12, total_time: 20, compatibility: 87, values: ['Ambition-driven', 'Family first', 'Outdoorsy'], bg: '#E8D5C4' },
-  { id: 'mock2', first_name: 'Jordan', age: 29, city: 'Brooklyn', profession: 'Designer', distance: '3.4 mi', talk_time: 5, total_time: 20, compatibility: 91, values: ['Creative', 'Adventurous', 'Deep thinker'], bg: '#C8D8E8' },
-  { id: 'mock3', first_name: 'Sofia', age: 26, city: 'Manhattan', profession: 'Writer', distance: '1.8 mi', talk_time: 3, total_time: 20, compatibility: 79, values: ['Creativity', 'Independence', 'Growth'], bg: '#D4C8E8' },
-  { id: 'mock4', first_name: 'Ava', age: 25, city: 'Austin', profession: 'Nurse', distance: '0.9 mi', talk_time: 8, total_time: 20, compatibility: 84, values: ['Compassion', 'Loyalty', 'Adventure'], bg: '#C8E8D4' },
-  { id: 'mock5', first_name: 'Priya', age: 28, city: 'Houston', profession: 'Engineer', distance: '4.2 mi', talk_time: 2, total_time: 20, compatibility: 93, values: ['Intelligence', 'Growth', 'Balance'], bg: '#E8E0C8' },
-]
-
 export default function DiscoverScreen({ navigation }: any) {
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null)
+  const [profiles, setProfiles] = useState<(UserProfile & { compatibilityScore: number })[]>([])
   const [matchCount, setMatchCount] = useState(0)
-  const [userCity, setUserCity] = useState('')
-  const [travelMode, setTravelMode] = useState(false)
-  const [travelCity, setTravelCity] = useState('')
   const [activeMatchIds, setActiveMatchIds] = useState<string[]>([])
   const [seenIds, setSeenIds] = useState<string[]>([])
   const [swipesUsed, setSwipesUsed] = useState(0)
   const [isPaid, setIsPaid] = useState(false)
-  const [swipeLimitHit, setSwipeLimitHit] = useState(false)
+  const [loading, setLoading] = useState(true)
 
-  const unavailableIds = [...new Set([...activeMatchIds, ...seenIds])]
-  const remainingProfiles = MOCK_PROFILES.filter(p => !unavailableIds.includes(p.id))
+  const remainingProfiles = profiles.filter(p => !seenIds.includes(p.id) && !activeMatchIds.includes(p.id))
   const profile = remainingProfiles[0] ?? null
   const atMatchLimit = matchCount >= MAX_MATCHES
   const atSwipeLimit = !isPaid && swipesUsed >= FREE_SWIPES_PER_DAY
-  const progressPercent = profile ? (profile.talk_time / profile.total_time) * 100 : 0
-  const activeCity = travelMode && travelCity ? travelCity : userCity
+  const progressPercent = profile ? Math.min((profile.compatibilityScore / 100) * 100, 100) : 0
 
   useFocusEffect(
     useCallback(() => {
-      loadUserData()
-      checkSubscription()
+      loadEverything()
     }, [])
   )
+
+  async function loadEverything() {
+    setLoading(true)
+    await Promise.all([loadUserData(), checkSubscription()])
+    setLoading(false)
+  }
 
   async function checkSubscription() {
     try {
       const info = await Purchases.getCustomerInfo()
-      const active = info.entitlements.active
-      setIsPaid(Object.keys(active).length > 0)
-    } catch (e) {
+      setIsPaid(Object.keys(info.entitlements.active).length > 0)
+    } catch {
       setIsPaid(false)
     }
   }
@@ -67,34 +61,38 @@ export default function DiscoverScreen({ navigation }: any) {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const [matchRes, profileRes, swipeRes] = await Promise.all([
+    const [matchRes, profileRes, allProfilesRes, swipeRes] = await Promise.all([
       supabase.from('matches').select('matched_user_id').eq('user_id', user.id).eq('status', 'active'),
-      supabase.from('profiles').select('city, travel_mode, travel_city').eq('id', user.id).single(),
+      supabase.from('profiles').select('*').eq('id', user.id).single(),
+      supabase.from('profiles').select('*').neq('id', user.id).limit(100),
       supabase.from('swipe_limits').select('swipes_used, last_swipe_at').eq('user_id', user.id).single(),
     ])
 
+    // Set match data
     const ids = (matchRes.data ?? []).map((m: any) => m.matched_user_id)
     setActiveMatchIds(ids)
     setMatchCount(ids.length)
 
+    // Set current user
     if (profileRes.data) {
-      setUserCity(profileRes.data.city ?? '')
-      setTravelMode(profileRes.data.travel_mode ?? false)
-      setTravelCity(profileRes.data.travel_city ?? '')
+      setCurrentUser(profileRes.data)
+
+      // Rank real profiles using algorithm
+      if (allProfilesRes.data && allProfilesRes.data.length > 0) {
+        const ranked = rankProfiles(profileRes.data, allProfilesRes.data)
+        setProfiles(ranked)
+      }
     }
 
+    // Handle swipe limits
     if (swipeRes.data) {
       const lastSwipe = new Date(swipeRes.data.last_swipe_at)
-      const now = new Date()
-      const hoursSinceLastSwipe = (now.getTime() - lastSwipe.getTime()) / (1000 * 60 * 60)
-      if (hoursSinceLastSwipe >= 24) {
-        // Reset swipes
-        await supabase.from('swipe_limits').update({ swipes_used: 0, last_swipe_at: now.toISOString() }).eq('user_id', user.id)
+      const hoursSince = (Date.now() - lastSwipe.getTime()) / (1000 * 60 * 60)
+      if (hoursSince >= 24) {
+        await supabase.from('swipe_limits').update({ swipes_used: 0, last_swipe_at: new Date().toISOString() }).eq('user_id', user.id)
         setSwipesUsed(0)
-        setSwipeLimitHit(false)
       } else {
         setSwipesUsed(swipeRes.data.swipes_used)
-        setSwipeLimitHit(swipeRes.data.swipes_used >= FREE_SWIPES_PER_DAY)
       }
     }
   }
@@ -102,55 +100,49 @@ export default function DiscoverScreen({ navigation }: any) {
   async function recordSwipe() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
     const newCount = swipesUsed + 1
     setSwipesUsed(newCount)
-
     const { data: existing } = await supabase.from('swipe_limits').select('id').eq('user_id', user.id).single()
     if (existing) {
       await supabase.from('swipe_limits').update({ swipes_used: newCount, last_swipe_at: new Date().toISOString() }).eq('user_id', user.id)
     } else {
       await supabase.from('swipe_limits').insert({ user_id: user.id, swipes_used: newCount, last_swipe_at: new Date().toISOString() })
     }
-
-    if (newCount >= FREE_SWIPES_PER_DAY) {
-      setSwipeLimitHit(true)
-    }
   }
 
   async function handleMatch() {
-    if (atMatchLimit) {
-      Alert.alert('Match limit reached', 'Go to Messages to unmatch someone.')
-      return
-    }
-    if (atSwipeLimit) {
-      navigation.navigate('Paywall')
-      return
-    }
+    if (atMatchLimit) { Alert.alert('Match limit reached', 'Go to Messages to unmatch someone.'); return }
+    if (atSwipeLimit) { navigation.navigate('Paywall'); return }
     if (!profile) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
+    const displayName = profile.nickname || profile.full_name?.split(' ')[0] || 'Someone'
     await supabase.from('matches').insert({
       user_id: user.id,
       matched_user_id: profile.id,
-      matched_user_name: profile.first_name,
+      matched_user_name: displayName,
       status: 'active',
     })
     setMatchCount(prev => Math.min(prev + 1, MAX_MATCHES))
     setActiveMatchIds(prev => [...prev, profile.id])
-    await notifyNewMatch(profile.first_name)
+    await notifyNewMatch(displayName)
     await recordSwipe()
   }
 
   function handlePass() {
-    if (atSwipeLimit) {
-      navigation.navigate('Paywall')
-      return
-    }
+    if (atSwipeLimit) { navigation.navigate('Paywall'); return }
     if (!profile) return
     setSeenIds(prev => [...prev, profile.id])
     recordSwipe()
+  }
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FAFAF8' }}>
+        <ActivityIndicator color="#C85A2A" size="large" />
+        <Text style={{ marginTop: 12, fontSize: 14, color: '#6B6B68' }}>Finding your matches...</Text>
+      </View>
+    )
   }
 
   return (
@@ -167,14 +159,11 @@ export default function DiscoverScreen({ navigation }: any) {
 
       <View style={styles.infoBar}>
         <TouchableOpacity
-          style={[styles.locationBadge, travelMode && styles.locationBadgeTravel]}
+          style={styles.locationBadge}
           onPress={() => navigation.navigate('TravelMode')}
         >
-          <Text style={styles.locationIcon}>{travelMode ? '✈️' : '📍'}</Text>
-          <Text style={[styles.locationText, travelMode && styles.locationTextTravel]}>
-            {travelMode ? `Traveling — ${travelCity || 'Set destination'}` : `Local — ${activeCity || 'Set your city'}`}
-          </Text>
-          <Text style={[styles.locationChange, travelMode && styles.locationChangeTravel]}>Change</Text>
+          <Text style={styles.locationIcon}>📍</Text>
+          <Text style={styles.locationText}>{currentUser?.city || 'Set your city'}</Text>
         </TouchableOpacity>
         <View style={styles.matchDots}>
           {Array.from({ length: MAX_MATCHES }).map((_, i) => (
@@ -218,7 +207,7 @@ export default function DiscoverScreen({ navigation }: any) {
         {remainingProfiles.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyEmoji}>🎉</Text>
-            <Text style={styles.emptyTitle}>You have seen everyone!</Text>
+            <Text style={styles.emptyTitle}>You've seen everyone!</Text>
             <Text style={styles.emptySub}>Check back soon for new people in your area.</Text>
             <TouchableOpacity style={styles.emptyBtn} onPress={() => navigation.navigate('Messages')}>
               <Text style={styles.emptyBtnText}>Go to Messages →</Text>
@@ -226,7 +215,7 @@ export default function DiscoverScreen({ navigation }: any) {
           </View>
         ) : profile ? (
           <View style={[styles.card, atMatchLimit && styles.cardDimmed]}>
-            <View style={[styles.photoArea, { backgroundColor: profile.bg }]}>
+            <View style={[styles.photoArea, { backgroundColor: '#E8D5C4' }]}>
               <BlurView intensity={80} style={styles.blurOverlay}>
                 <View style={styles.silhouetteCircle}>
                   <Text style={styles.silhouetteIcon}>👤</Text>
@@ -236,38 +225,51 @@ export default function DiscoverScreen({ navigation }: any) {
               </BlurView>
               <View style={styles.verifiedBadge}>
                 <View style={styles.verifiedDot} />
-                <Text style={styles.verifiedText}>AI Verified</Text>
+                <Text style={styles.verifiedText}>Verified</Text>
               </View>
               <View style={styles.compatBadge}>
-                <Text style={styles.compatBadgeText}>{profile.compatibility}% match</Text>
+                <Text style={styles.compatBadgeText}>{profile.compatibilityScore}% match</Text>
               </View>
             </View>
 
             <View style={styles.cardBody}>
-              <Text style={styles.name}>{profile.first_name}, {profile.age}</Text>
-              <Text style={styles.meta}>{profile.city} · {profile.profession} · {profile.distance} away</Text>
+              <Text style={styles.name}>
+                {profile.nickname || profile.full_name?.split(' ')[0] || 'Someone'}, {profile.age}
+              </Text>
+              <Text style={styles.meta}>
+                {profile.city}{profile.state ? `, ${profile.state}` : ''}
+                {profile.occupation ? ` · ${profile.occupation}` : ''}
+              </Text>
 
               <View style={styles.progressSection}>
                 <View style={styles.progressLabelRow}>
-                  <Text style={styles.progressLabel}>Talk time to reveal</Text>
-                  <Text style={styles.progressValue}>{profile.talk_time} / {profile.total_time} min</Text>
+                  <Text style={styles.progressLabel}>Compatibility score</Text>
+                  <Text style={styles.progressValue}>{profile.compatibilityScore}%</Text>
                 </View>
                 <View style={styles.progressTrack}>
                   <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
                 </View>
               </View>
 
-              <View style={styles.chipsRow}>
-                {profile.values.map((value, index) => (
-                  <View key={index} style={styles.chip}>
-                    <Text style={styles.chipText}>{value}</Text>
-                  </View>
-                ))}
-              </View>
+              {/* Shared values chips */}
+              {profile.quiz_answers?.coreValues && currentUser?.quiz_answers?.coreValues && (
+                <View style={styles.chipsRow}>
+                  {profile.quiz_answers.coreValues
+                    .filter(v => currentUser?.quiz_answers?.coreValues?.includes(v))
+                    .slice(0, 3)
+                    .map((value, index) => (
+                      <View key={index} style={styles.chip}>
+                        <Text style={styles.chipText}>✓ {value}</Text>
+                      </View>
+                    ))}
+                </View>
+              )}
 
               <View style={styles.compatBox}>
-                <Text style={styles.compatNum}>{profile.compatibility}%</Text>
-                <Text style={styles.compatText}>compatibility · matched on values, conflict style & life goals</Text>
+                <Text style={styles.compatNum}>{profile.compatibilityScore}%</Text>
+                <Text style={styles.compatText}>
+                  compatibility · matched on values, conflict style & life goals
+                </Text>
               </View>
 
               <View style={styles.actionRow}>
@@ -314,12 +316,8 @@ const styles = StyleSheet.create({
   profileText: { fontSize: 14, color: '#C85A2A', fontWeight: '600' },
   infoBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 10, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#EBEBEA' },
   locationBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 5, paddingHorizontal: 10, borderRadius: 20, backgroundColor: '#F5F4F2', borderWidth: 1, borderColor: '#EBEBEA' },
-  locationBadgeTravel: { backgroundColor: 'rgba(200,90,42,0.08)', borderColor: '#C85A2A' },
   locationIcon: { fontSize: 12 },
   locationText: { fontSize: 12, fontWeight: '500', color: '#6B6B68' },
-  locationTextTravel: { color: '#C85A2A' },
-  locationChange: { fontSize: 10, color: '#ABABAA', fontWeight: '500' },
-  locationChangeTravel: { color: '#C85A2A', opacity: 0.7 },
   matchDots: { flexDirection: 'row', gap: 4 },
   matchDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#EBEBEA', borderWidth: 1, borderColor: '#E0DDD8' },
   matchDotFilled: { backgroundColor: '#C85A2A', borderColor: '#C85A2A' },

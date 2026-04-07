@@ -107,7 +107,7 @@ export default function SignUpScreen({ navigation }: any) {
   const [gender, setGender] = useState('')
   const [seeking, setSeeking] = useState('')
   const [minAge, setMinAge] = useState(18)
-  const [maxAge, setMaxAge] = useState(45)
+  const [maxAge, setMaxAge] = useState(99)
   const [loading, setLoading] = useState(false)
   const [agreedToTerms, setAgreedToTerms] = useState(false)
   const [showTerms, setShowTerms] = useState(false)
